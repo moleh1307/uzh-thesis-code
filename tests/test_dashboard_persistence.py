@@ -238,6 +238,76 @@ class DashboardPersistenceTests(unittest.TestCase):
                 self.progress.unlink()
                 self.coded.unlink()
 
+    def source_missing(self):
+        return dict(audit_id="u1", human_content_class="uncertain", human_ok="",
+                    human_specificity="", human_notes="Source incomplete")
+
+    def test_source_missing_preserved_in_progress_csv_export_and_restart(self):
+        store = self.store()
+        stats = store.save(self.source_missing())
+        self.assertEqual(stats["reviewed"], 1)
+        self.assertEqual(stats["scored"], 0)
+        self.assertEqual(stats["source_missing"], 1)
+        self.assertEqual(stats["remaining"], 1)
+        exported = list(csv.DictReader(store.export_csv_text().splitlines()))[0]
+        for key, value in self.source_missing().items():
+            self.assertEqual(exported[key], value)
+        before = self.snapshot()
+        restarted = self.store()
+        self.assertEqual(restarted.labels["u1"]["annotation_state"], "source_uninterpretable")
+        self.assertEqual(self.snapshot(), before)
+
+    def test_source_missing_csv_import_preserves_blank_values(self):
+        self.store()
+        rows = self.read()
+        rows[0].update(self.source_missing())
+        self.write(self.coded, rows)
+        store = self.store(label_source="coded-csv")
+        store.save(self.label("u2", 4))
+        self.assertEqual(self.read()[0]["human_ok"], "")
+        self.assertEqual(self.read()[0]["human_specificity"], "")
+        self.assertEqual(self.store().labels["u1"]["human_notes"], "Source incomplete")
+
+    def test_source_missing_requires_reason_and_exact_blank_status_score(self):
+        store = self.store()
+        for change in ({"human_notes": " "}, {"human_notes": None}, {"human_notes": 123},
+                       {"human_ok": 0}, {"human_specificity": 0},
+                       {"human_content_class": "substantive"}, {"human_ok": False}):
+            before = self.snapshot()
+            with self.assertRaises(ValueError):
+                store.save(dict(self.source_missing(), **change))
+            self.assertEqual(self.snapshot(), before)
+        store.save(dict(self.source_missing(), human_ok=None, human_specificity=None))
+        self.assertEqual(self.read()[0]["human_specificity"], "")
+
+    def test_source_missing_clear_is_unfinished_not_zero(self):
+        store = self.store()
+        store.save(self.source_missing())
+        store.save(dict(audit_id="u1", clear=True))
+        self.assertEqual(store.stats()["reviewed"], 0)
+        self.assertEqual(store.stats()["remaining"], 2)
+        self.assertNotIn("u1", store.labels)
+        self.assertTrue(all(self.read()[0][key] == "" for key in
+                            ("human_content_class", "human_ok", "human_specificity", "human_notes")))
+
+    def test_procedural_zero_is_distinct_from_source_missing(self):
+        store = self.store()
+        store.save(self.source_missing())
+        store.save(dict(audit_id="u2", human_content_class="procedural_only", human_ok=0,
+                        human_specificity=0, human_notes="Routine handoff"))
+        self.assertEqual(store.stats()["reviewed"], 2)
+        self.assertEqual(store.stats()["scored"], 0)
+        self.assertEqual(store.stats()["source_missing"], 1)
+        self.assertEqual(store.stats()["procedural_only"], 1)
+        self.assertEqual([r["human_specificity"] for r in self.read()], ["", "0"])
+
+    def test_interpretable_uncertain_scored_state_remains_supported(self):
+        store = self.store()
+        store.save(dict(self.label(), human_content_class="uncertain"))
+        self.assertEqual(self.store().labels["u1"]["human_specificity"], 2)
+        self.assertEqual(store.stats()["scored"], 1)
+        self.assertEqual(store.stats()["source_missing"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -224,8 +224,8 @@ class AuditStore:
                 continue
             try:
                 payload = dict(fields, audit_id=row["audit_id"])
-                payload["human_ok"] = int(fields["human_ok"])
-                payload["human_specificity"] = int(fields["human_specificity"])
+                payload["human_ok"] = int(fields["human_ok"]) if fields["human_ok"] else ""
+                payload["human_specificity"] = int(fields["human_specificity"]) if fields["human_specificity"] else ""
                 _, label = self.validate_label(payload)
             except ValueError as exc:
                 raise PersistenceConflict(f"invalid coded CSV label for {row['audit_id']}: {exc}") from exc
@@ -251,6 +251,16 @@ class AuditStore:
         specificity = payload.get("human_specificity")
         content_class = str(payload.get("human_content_class", "")).strip()
         notes = str(payload.get("human_notes", "")).strip()
+        if len(notes) > 2000:
+            raise ValueError("human_notes exceeds 2000 characters")
+        source_missing = (self.content_class_required and content_class == "uncertain"
+                          and human_ok in (None, "") and specificity in (None, ""))
+        if source_missing:
+            if not isinstance(payload.get("human_notes"), str) or not notes:
+                raise ValueError("source-uninterpretable rows require a source-quality reason")
+            return audit_id, {"human_ok": "", "human_specificity": "",
+                              "human_content_class": "uncertain", "human_notes": notes,
+                              "annotation_state": "source_uninterpretable", "saved_at": utc_now()}
         if type(human_ok) is not int or human_ok not in (0, 1):
             raise ValueError("human_ok must be 0 or 1")
         if type(specificity) is not int:
@@ -273,13 +283,12 @@ class AuditStore:
                 raise ValueError("scorable rows require specificity 1-5")
             if human_ok == 0 and specificity != 0:
                 raise ValueError("unscorable rows require specificity 0")
-        if len(notes) > 2000:
-            raise ValueError("human_notes exceeds 2000 characters")
         label: dict[str, Any] = {
             "human_ok": human_ok,
             "human_specificity": specificity,
             "human_notes": notes,
             "saved_at": utc_now(),
+            "annotation_state": "scored" if human_ok == 1 else "procedural_only",
         }
         if self.content_class_required:
             label["human_content_class"] = content_class
@@ -351,21 +360,26 @@ class AuditStore:
         atomic_text_write(self.coded_csv_path, self._coded_csv_text())
 
     def stats(self) -> dict[str, int]:
-        scored = len(self.labels)
+        reviewed = len(self.labels)
         return {
             "total": len(self.rows),
-            "scored": scored,
-            "remaining": len(self.rows) - scored,
+            "reviewed": reviewed,
+            "scored": sum(label["human_ok"] == 1 for label in self.labels.values()),
+            "source_missing": sum(label.get("annotation_state") == "source_uninterpretable" for label in self.labels.values()),
+            "procedural_only": sum(label["human_ok"] == 0 for label in self.labels.values()),
+            "remaining": len(self.rows) - reviewed,
             "pre_total": sum(row["unit_type"] == "pre" for row in self.rows),
             "qa_total": sum(row["unit_type"] == "qa" for row in self.rows),
             "pre_scored": sum(
-                row["unit_type"] == "pre" and row["audit_id"] in self.labels
+                row["unit_type"] == "pre" and self.labels.get(row["audit_id"], {}).get("human_ok") == 1
                 for row in self.rows
             ),
             "qa_scored": sum(
-                row["unit_type"] == "qa" and row["audit_id"] in self.labels
+                row["unit_type"] == "qa" and self.labels.get(row["audit_id"], {}).get("human_ok") == 1
                 for row in self.rows
             ),
+            "pre_reviewed": sum(row["unit_type"] == "pre" and row["audit_id"] in self.labels for row in self.rows),
+            "qa_reviewed": sum(row["unit_type"] == "qa" and row["audit_id"] in self.labels for row in self.rows),
         }
 
     def public_state(self) -> dict[str, Any]:

@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from specificity_validation import strict_json, validate_result, verify_provenance
+from specificity_validation import strict_json, validate_result, verify_provenance, reconcile_attempts
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -80,12 +80,13 @@ def main() -> int:
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     inputs = index_results(read_jsonl(args.input_jsonl), "input")
-    outputs = index_results(read_jsonl(args.output_jsonl), "output")
-    repeats = (
-        index_results(read_jsonl(args.repeat_output_jsonl), "repeat output")
-        if args.repeat_output_jsonl
-        else None
-    )
+    output_attempts = read_jsonl(args.output_jsonl)
+    repeat_attempts = read_jsonl(args.repeat_output_jsonl) if args.repeat_output_jsonl else None
+    try:
+        outputs = reconcile_attempts(output_attempts)
+        repeats = reconcile_attempts(repeat_attempts) if repeat_attempts is not None else None
+    except ValueError as exc:
+        raise SystemExit(f"invalid attempt history: {exc}") from exc
     manifest = read_csv(args.manifest_csv)
     expected_ids = set(inputs)
     if not inputs:
@@ -94,10 +95,10 @@ def main() -> int:
         raise SystemExit("manifest custom_id set does not match input")
     try:
         provenance = verify_provenance(args.input_jsonl, args.output_jsonl, args.run_manifest,
-                                       args.manifest_csv, list(inputs.values()), list(outputs.values()))
+                                       args.manifest_csv, list(inputs.values()), output_attempts)
         repeat_provenance = (verify_provenance(args.input_jsonl, args.repeat_output_jsonl,
                              args.repeat_run_manifest, args.manifest_csv,
-                             list(inputs.values()), list(repeats.values())) if repeats is not None else None)
+                             list(inputs.values()), repeat_attempts) if repeats is not None else None)
         if repeat_provenance and repeat_provenance["run_binding_sha256"] != provenance["run_binding_sha256"]:
             raise ValueError("repeat run execution identity differs from original run")
     except (ValueError, OSError) as exc:
@@ -149,6 +150,8 @@ def main() -> int:
             "unit_word_count": source.get("unit_word_count", ""),
             "question_word_count": source.get("question_word_count", ""),
             "status": output.get("status", "missing"),
+            "final_attempt_number": output.get("attempt_number", 1) if original else "",
+            "retry_reason": output.get("retry_reason", ""),
             "technical_valid": int(output_valid),
             "ok": parsed.get("ok") if isinstance(parsed, dict) else "",
             "specificity": parsed.get("specificity") if isinstance(parsed, dict) else "",

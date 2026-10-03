@@ -127,6 +127,67 @@ def validate_result(row):
         return False, str(exc)
 
 
+def technical_retry_reason(row):
+    if row.get("input_truncated") or row.get("input_context_rejected") or validate_result(row)[0]:
+        return None
+    if row.get("status") == "error":
+        return "inference_error"
+    if row.get("status") == "completed":
+        return "output_truncation" if row.get("output_truncated") else "output_validation_failure"
+    return None
+
+
+def reconcile_attempts(rows):
+    """Select final attempts by ID, never by score; retain original rows in the source."""
+    selected = {}
+    for row in rows:
+        key = row.get("custom_id")
+        attempt = row.get("attempt_number", 1)
+        if not isinstance(key, str) or not key or type(attempt) is not int or attempt not in {1, 2}:
+            raise ValueError("invalid attempt ID/number")
+        previous = selected.get(key)
+        if previous is None:
+            if attempt != 1:
+                raise ValueError("second attempt without original evidence")
+            if row.get("retry_reason") is not None:
+                raise ValueError("first attempt cannot claim a retry reason")
+        else:
+            reason = technical_retry_reason(previous)
+            if (previous.get("attempt_number", 1) != 1 or attempt != 2 or not reason
+                    or row.get("retry_reason") != reason
+                    or previous.get("run_binding_sha256") != row.get("run_binding_sha256")):
+                raise ValueError("duplicate, third, unbound or ineligible technical retry")
+        selected[key] = row
+    return selected
+
+
+def attempt_ledger(rows):
+    selected = reconcile_attempts(rows)
+    return {"total_attempt_records": len(rows), "unique_request_ids": len(selected),
+            "retried_ids": sorted(key for key, row in selected.items() if row.get("attempt_number") == 2),
+            "first_attempt_invalid_ids": sorted(row["custom_id"] for row in rows
+                if row.get("attempt_number", 1) == 1 and not validate_result(row)[0])}
+
+
+def validate_retry_reservations(rows, reservations, request_ids):
+    if not isinstance(reservations, dict):
+        raise ValueError("retry reservations must be an object")
+    originals = {row["custom_id"]: row for row in rows if row.get("attempt_number", 1) == 1}
+    selected = reconcile_attempts(rows)
+    for key, reservation in reservations.items():
+        original = originals.get(key)
+        if (key not in request_ids or not isinstance(reservation, dict)
+                or type(reservation.get("attempt_number")) is not int
+                or reservation["attempt_number"] != 2 or original is None
+                or not technical_retry_reason(original)
+                or reservation.get("retry_reason") != technical_retry_reason(original)):
+            raise ValueError("invalid or ineligible retry reservation")
+    for key, row in selected.items():
+        if row.get("attempt_number") == 2 and key not in reservations:
+            raise ValueError("second attempt lacks its persisted retry reservation")
+    return sorted(key for key in reservations if selected[key].get("attempt_number", 1) != 2)
+
+
 def verify_provenance(input_path, output_path, manifest_path, unit_manifest_path, requests, outputs):
     """File hashes bind exact bytes; row bindings bind each output to that run."""
     if manifest_path is None:
@@ -164,5 +225,8 @@ def verify_provenance(input_path, output_path, manifest_path, unit_manifest_path
     for row in outputs:
         if row.get("run_binding_sha256") != binding_hash:
             raise ValueError("output row run identity mismatch")
+    ledger = attempt_ledger(outputs)
+    ledger["reserved_retries_without_result"] = validate_retry_reservations(
+        outputs, manifest.get("retry_reservations", {}), schemas)
     return {"verified": True, "run_binding_sha256": binding_hash,
-            "contract": binding["contract"]}
+            "contract": binding["contract"], "attempt_ledger": ledger}

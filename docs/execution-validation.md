@@ -1,8 +1,8 @@
 # Execution And Output Checks
 
-Repairs #2, #3 and #7 are software checks, not approval to run the model or scale
+Repairs #2, #3, #7 and #4 are software checks, not approval to run the model or scale
 the research. Prompt, two-field schema and decoding values are unchanged.
-The remaining bounded-retry issue (#4) still blocks full protocol readiness.
+Other open pipeline issues still prevent full protocol-readiness claims.
 
 ## Reviewed Local Identity
 
@@ -57,9 +57,27 @@ python3 tools/llm_measurement/run_local_specificity.py \
 Input-only `--validate-only` needs neither a profile nor model dependencies and
 does not certify execution identity. Resume requires matching prior binding,
 manifest and checkpoint checksum. Mismatch fails before any append or rewrite;
-first-run creation/provenance is retained. Failed rows are not retried yet (#4).
+first-run creation/provenance is retained. Ordinary resume does not retry recorded rows.
 For consumer-ready bounded runs, freeze a separate exact input/metadata subset
 rather than consuming a `--limit` result as though it covered a larger file.
+
+## Explicit Technical Retry
+
+After all first attempts have been recorded, add `--resume --technical-retry`
+to the otherwise identical scoring command to allow one additional attempt for
+an inference error, invalid output/schema or output truncation. Input-context
+rejection is not retryable. There is no retry for a valid low score, abstention
+or disagreement with a human label, and no selection of the more favorable score.
+
+The runner preserves original rows and appends attempt 2 with its technical
+reason. Input, metadata, runner, validation code, backend and settings bindings
+must still match. A retry reservation is written before inference: an interrupted
+retry without a result remains explicitly unresolved and is not invoked again.
+Consumers use the final recorded attempt per ID, validate every attempt's
+binding, and report the original failures and unresolved reservations separately.
+A second failure remains a failure; rerunning the flag cannot create attempt 3.
+An interrupted first pass must finish missing first attempts with ordinary resume
+before this separate retry pass. Changed code cannot resume an old bound run.
 
 ## Complete Response Evidence
 

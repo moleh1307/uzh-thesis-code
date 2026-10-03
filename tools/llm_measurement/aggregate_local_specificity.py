@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from specificity_validation import strict_json, validate_result, verify_provenance
+from specificity_validation import strict_json, validate_result, verify_provenance, reconcile_attempts
 
 import argparse
 import csv
@@ -306,6 +306,8 @@ def build_unit_rows(
                 "source_quality_tier": source.get("source_quality_tier", ""),
                 "source_block_flags": source.get("source_block_flags", ""),
                 "status": output.get("status", ""),
+                "final_attempt_number": output.get("attempt_number", 1) if output else "",
+                "retry_reason": output.get("retry_reason", ""),
                 "model_ok": model_ok if model_ok is not None else "",
                 "model_specificity": model_specificity if model_specificity is not None else "",
                 "scored": scored,
@@ -694,13 +696,17 @@ def main() -> int:
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     input_rows = index_unique(read_csv_rows(args.input_manifest), "custom_id", "input manifest")
-    output_rows = index_unique(read_jsonl(args.output_jsonl), "custom_id", "model output")
+    output_attempts = read_jsonl(args.output_jsonl)
+    try:
+        output_rows = reconcile_attempts(output_attempts)
+    except ValueError as exc:
+        raise SystemExit(f"invalid attempt history: {exc}") from exc
     requests = read_jsonl(args.input_jsonl)
     if not input_rows or set(input_rows) != {r["custom_id"] for r in requests}:
         raise SystemExit("input request/unit metadata coverage mismatch or empty input")
     try:
         provenance = verify_provenance(args.input_jsonl, args.output_jsonl, args.run_manifest,
-                                       args.input_manifest, requests, list(output_rows.values()))
+                                       args.input_manifest, requests, output_attempts)
     except (ValueError, OSError) as exc:
         raise SystemExit(f"provenance rejected: {exc}") from exc
     coverage = {"missing_output_ids": sorted(set(input_rows) - set(output_rows)),
@@ -744,7 +750,8 @@ def main() -> int:
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     unit_fields = [
         "custom_id", "unit_type", "event_id", "start_date", "unit_word_count", "question_word_count",
-        "source_quality_tier", "source_block_flags", "status", "model_ok", "model_specificity", "scored",
+        "source_quality_tier", "source_block_flags", "status", "final_attempt_number", "retry_reason",
+        "model_ok", "model_specificity", "scored",
         "model_validation_error", "input_tokens", "output_tokens", "elapsed_seconds",
     ]
     write_csv(args.output_dir / "specificity_unit_results.csv", unit_rows, unit_fields)

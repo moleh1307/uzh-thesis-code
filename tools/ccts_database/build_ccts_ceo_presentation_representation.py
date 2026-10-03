@@ -17,14 +17,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from ceo_title_evidence import SPECIAL_CEO_RE, candidate_evidence, evidence_labels, shared_evidence
+
 
 CEO_RE = re.compile(r"\b(?:ceo|chief\s+executive\s+officer)\b", re.IGNORECASE)
 FORMER_CEO_RE = re.compile(r"\b(?:former|retired|ex[-\s])\b", re.IGNORECASE)
-SPECIAL_CEO_RE = re.compile(
-    r"\b(?:interim|co[-\s]?ceo|co[-\s]?chief\s+executive|"
-    r"acting\s+(?:as\s+)?(?:ceo|chief\s+executive\s+officer))\b",
-    re.IGNORECASE,
-)
 CEO_ASSISTANT_RE = re.compile(r"\b(?:ceo\s+assistant|assistant\s+to\s+(?:the\s+)?ceo)\b", re.IGNORECASE)
 
 EVENT_COLUMNS = [
@@ -91,8 +88,8 @@ def write_csv(path: Path, fields: Sequence[str], rows: Iterable[Mapping[str, Any
             })
 
 
-def candidate_map(rows: Sequence[Mapping[str, str]]) -> dict[str, str]:
-    return {speaker_key(row): label(row) for row in rows if is_current_ceo(row) and speaker_key(row)}
+def candidate_map(rows: Sequence[Mapping[str, str]]) -> dict[str, tuple[str, ...]]:
+    return candidate_evidence(rows, is_current_ceo, speaker_key, label)
 
 
 def choose_manual_rows(rows: Sequence[Mapping[str, Any]], limit: int) -> list[Mapping[str, Any]]:
@@ -153,7 +150,7 @@ def main() -> int:
         pre_candidates = candidate_map(pre_turns)
         qa_candidates = candidate_map(qa_turns)
         shared_keys = sorted(set(pre_candidates) & set(qa_candidates))
-        shared_labels = [qa_candidates[key] for key in shared_keys]
+        shared_labels = shared_evidence(pre_candidates, qa_candidates, shared_keys)
         pre_ceo_turns = [turn for turn in pre_turns if speaker_key(turn) in shared_keys]
         qa_ceo_turns = [turn for turn in qa_turns if speaker_key(turn) in shared_keys]
         flags: list[str] = []
@@ -163,7 +160,7 @@ def main() -> int:
             flags.append("MULTIPLE_PRE_CEO_CANDIDATES")
         if len(shared_keys) > 1:
             flags.append("MULTIPLE_SHARED_CEO_CANDIDATES")
-        if any(SPECIAL_CEO_RE.search(label_text) for label_text in shared_labels):
+        if any(SPECIAL_CEO_RE.search(text) for text in evidence_labels(pre_candidates) + evidence_labels(qa_candidates)):
             flags.append("SPECIAL_CEO_TITLE")
         source_status = block_audit.get(event_id, {}).get("event_audit_status", "missing_block_audit")
         if source_status != "usable":
@@ -183,7 +180,7 @@ def main() -> int:
             "event_id": event_id, "sample_rank": first.get("sample_rank", ""), "start_date": first.get("start_date", ""),
             "year": first.get("year", ""), "company_name": first.get("company_name", ""),
             "company_ticker": first.get("company_ticker", ""), "event_title": first.get("event_title", ""),
-            "pre_ceo_speakers": "; ".join(pre_candidates.values()), "qa_ceo_speakers": "; ".join(qa_candidates.values()),
+            "pre_ceo_speakers": "; ".join(evidence_labels(pre_candidates)), "qa_ceo_speakers": "; ".join(evidence_labels(qa_candidates)),
             "shared_ceo_speakers": "; ".join(shared_labels), "shared_ceo_candidate_count": len(shared_keys),
             "identity_status": identity_status, "identity_flags": ";".join(sorted(set(flags))),
             "source_block_event_status": source_status, "pre_ceo_turn_count": len(pre_ceo_turns),

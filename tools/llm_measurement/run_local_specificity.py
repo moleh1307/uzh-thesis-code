@@ -21,7 +21,8 @@ from typing import Any
 
 from local_execution_identity import prepare_backend
 from specificity_validation import (decode_evidence, digest, require_schema,
-                                    validate_result, validate_score, strict_json)
+                                    validate_result, validate_score, strict_json,
+                                    reconcile_attempts, technical_retry_reason, validate_retry_reservations)
 
 
 def sha256_path(path: Path) -> str:
@@ -168,6 +169,8 @@ def main() -> int:
     parser.add_argument("--max-new-tokens", type=int, default=16)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--technical-retry", action="store_true",
+                        help="with --resume, allow one same-settings retry of technical failures only")
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--contract-version", default="specificity_v1_20260720")
     parser.add_argument("--settings", type=Path, help="reviewed decoding/runtime settings JSON")
@@ -176,6 +179,8 @@ def main() -> int:
     parser.add_argument("--capture-execution-profile", type=Path,
                         help="capture an unapproved candidate identity; load locally but do not score")
     args = parser.parse_args()
+    if args.technical_retry and (not args.resume or args.capture_execution_profile or args.validate_only):
+        raise SystemExit("--technical-retry requires --resume and cannot be combined with capture/validate-only")
 
     if args.max_new_tokens <= 0:
         raise SystemExit("--max-new-tokens must be positive")
@@ -265,9 +270,11 @@ def main() -> int:
         "response_schema_hashes": {r["custom_id"]: digest(r["response_schema"]) for r in records},
         "validation_module_sha256": sha256_path(Path(__file__).with_name("specificity_validation.py")),
         "execution_module_sha256": sha256_path(Path(__file__).with_name("local_execution_identity.py")),
+        "technical_retry_policy": "explicit_one_additional_same_settings_attempt_no_score_selection",
     }
     binding_hash = digest(binding)
     prior = None
+    saved_attempts = []
     if args.resume and args.output_jsonl.exists():
         if not args.run_manifest.exists():
             raise SystemExit("resume requires original run manifest")
@@ -276,14 +283,30 @@ def main() -> int:
             raise SystemExit("resume execution identity differs; prior provenance left unchanged")
         if prior.get("output_sha256") is not None and prior["output_sha256"] != sha256_path(args.output_jsonl):
             raise SystemExit("resume output checksum differs; checkpoint left unchanged")
-        for record in read_jsonl(args.output_jsonl):
+        saved_attempts = read_jsonl(args.output_jsonl)
+        for record in saved_attempts:
             custom_id = record.get("custom_id")
-            if custom_id not in custom_ids or custom_id in completed:
-                raise SystemExit("resume file has an unknown or duplicate custom_id")
+            if custom_id not in custom_ids:
+                raise SystemExit("resume file has an unknown custom_id")
             if record.get("run_binding_sha256") != binding_hash:
                 raise SystemExit("resume input/model/settings/runner binding differs or is absent")
-            completed[custom_id] = record
+        try:
+            completed = reconcile_attempts(saved_attempts)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+    reservations = prior.get("retry_reservations", {}) if prior else {}
+    try:
+        validate_retry_reservations(saved_attempts, reservations, custom_ids)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     pending = [record for record in records if record["custom_id"] not in completed]
+    if args.technical_retry:
+        if pending:
+            raise SystemExit("finish missing first attempts with ordinary --resume before a technical retry pass")
+        pending = [record for record in records if
+                   completed[record["custom_id"]].get("attempt_number", 1) == 1
+                   and technical_retry_reason(completed[record["custom_id"]])
+                   and record["custom_id"] not in reservations]
     args.output_jsonl.parent.mkdir(parents=True, exist_ok=True)
 
     run_manifest = {
@@ -306,6 +329,7 @@ def main() -> int:
         "runtime": identity["runtime"],
         "effective_generation_config": identity["generation_config"],
         "actual_device_map": identity["device_map"],
+        "retry_reservations": reservations,
         "first_run_provenance": (prior["first_run_provenance"] if prior else {
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
             "execution_identity_sha256": digest(identity),
@@ -317,7 +341,17 @@ def main() -> int:
     interrupted = False
     try:
         with args.output_jsonl.open("a", encoding="utf-8") as output_handle:
-            for result in generate_results(args, pending, binding_hash, backend):
+            for request in pending:
+                key = request["custom_id"]
+                previous = completed.get(key)
+                reason = technical_retry_reason(previous) if args.technical_retry else None
+                if args.technical_retry:
+                    # Persist the reservation before model invocation so interruption cannot permit attempt three.
+                    reservations[key] = {"attempt_number": 2, "retry_reason": reason,
+                                         "reserved_at_utc": datetime.now(timezone.utc).isoformat()}
+                    atomic_json_write(args.run_manifest, run_manifest)
+                result = next(generate_results(args, [request], binding_hash, backend))
+                result.update({"attempt_number": 2 if args.technical_retry else 1, "retry_reason": reason})
                 output_handle.write(json.dumps(result, ensure_ascii=False, separators=(",", ":")) + "\n")
                 output_handle.flush()
                 os.fsync(output_handle.fileno())
@@ -326,11 +360,12 @@ def main() -> int:
                 counts = run_manifest["counts"]
                 valid = result_is_valid(result)
                 counts["processed_this_run"] = processed
-                counts["completed_status"] += int(result["status"] == "completed")
-                counts["row_errors"] += int(result["status"] == "error")
-                counts["strict_valid_outputs"] += int(valid)
-                counts["invalid_or_error_outputs"] += int(not valid)
-                counts["missing_outputs"] -= 1
+                previous_valid = result_is_valid(previous) if previous else False
+                counts["completed_status"] += int(result["status"] == "completed") - int(bool(previous and previous["status"] == "completed"))
+                counts["row_errors"] += int(result["status"] == "error") - int(bool(previous and previous["status"] == "error"))
+                counts["strict_valid_outputs"] += int(valid) - int(previous_valid)
+                counts["invalid_or_error_outputs"] += int(not valid) - int(previous is not None and not previous_valid)
+                counts["missing_outputs"] -= int(previous is None)
                 run_manifest["updated_at_utc"] = datetime.now(timezone.utc).isoformat()
                 atomic_json_write(args.run_manifest, run_manifest)
                 print(f"{processed}/{len(pending)} {result['custom_id']} {result['status']} "
@@ -352,6 +387,9 @@ def main() -> int:
         "fatal_error": fatal_error,
         "updated_at_utc": datetime.now(timezone.utc).isoformat(),
         "output_sha256": sha256_path(args.output_jsonl) if args.output_jsonl.exists() else None,
+        "retried_ids": sorted(key for key, row in completed.items() if row.get("attempt_number") == 2),
+        "reserved_retries_without_result": sorted(key for key in reservations
+            if completed.get(key, {}).get("attempt_number", 1) != 2),
     })
     atomic_json_write(args.run_manifest, run_manifest)
     print(json.dumps(run_manifest, indent=2))

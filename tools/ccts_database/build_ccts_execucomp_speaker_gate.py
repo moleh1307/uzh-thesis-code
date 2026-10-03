@@ -21,6 +21,7 @@ from build_ccts_ceo_presentation_representation import (
     speaker_key,
 )
 from validate_ccts_execucomp_speaker_identity import best
+from ceo_title_evidence import GATE_VERSION, candidate_evidence, evidence_labels, shared_evidence
 
 
 ACCEPTED_NAME_RELATIONS = {
@@ -84,26 +85,19 @@ def quarter_from_date(date_text: str) -> str:
     return f"{year}Q{((month - 1) // 3) + 1}"
 
 
-def make_candidate_map(rows: Iterable[Mapping[str, str]]) -> dict[str, str]:
-    candidates: dict[str, str] = {}
-    for row in rows:
-        if not is_current_ceo(row):
-            continue
-        key = speaker_key(row)
-        if key:
-            candidates[key] = label(row)
-    return candidates
+def make_candidate_map(rows: Iterable[Mapping[str, str]]) -> dict[str, tuple[str, ...]]:
+    return candidate_evidence(rows, is_current_ceo, speaker_key, label)
 
 
 def classify_event(
     source: Mapping[str, str],
     expected_name: str,
-    pre_candidates: Mapping[str, str],
-    qa_candidates: Mapping[str, str],
+    pre_candidates: Mapping[str, tuple[str, ...]],
+    qa_candidates: Mapping[str, tuple[str, ...]],
     turn_counts: Mapping[str, int],
 ) -> dict[str, Any]:
     shared_keys = sorted(set(pre_candidates) & set(qa_candidates))
-    shared_labels = [qa_candidates[key] for key in shared_keys]
+    shared_labels = shared_evidence(pre_candidates, qa_candidates, shared_keys)
     flags: list[str] = []
     if not shared_keys:
         flags.append("NO_SHARED_PRE_QA_CEO_LABEL")
@@ -111,7 +105,7 @@ def classify_event(
         flags.append("MULTIPLE_PRE_CEO_CANDIDATES")
     if len(shared_keys) > 1:
         flags.append("MULTIPLE_SHARED_CEO_CANDIDATES")
-    if any(SPECIAL_CEO_RE.search(value) for value in shared_labels):
+    if any(SPECIAL_CEO_RE.search(value) for value in evidence_labels(pre_candidates) + evidence_labels(qa_candidates)):
         flags.append("SPECIAL_CEO_TITLE")
     identity_ready = int(len(shared_keys) == 1 and not flags)
     if identity_ready:
@@ -125,8 +119,8 @@ def classify_event(
     else:
         identity_status = "review_or_no_shared_speaker_key"
 
-    pre_quality, pre_matches = best(expected_name, list(pre_candidates.values()))
-    qa_quality, qa_matches = best(expected_name, list(qa_candidates.values()))
+    pre_quality, pre_matches = best(expected_name, evidence_labels(pre_candidates))
+    qa_quality, qa_matches = best(expected_name, evidence_labels(qa_candidates))
     shared_quality, shared_matches = best(expected_name, shared_labels)
     if identity_ready and shared_quality in ACCEPTED_NAME_RELATIONS:
         external_status = "confirmed_external_ceo_shared_pre_qa"
@@ -166,8 +160,8 @@ def classify_event(
         "pre_ceo_candidate_count": len(pre_candidates),
         "qa_ceo_candidate_count": len(qa_candidates),
         "shared_ceo_candidate_count": len(shared_keys),
-        "pre_ceo_speakers": "; ".join(pre_candidates.values()),
-        "qa_ceo_speakers": "; ".join(qa_candidates.values()),
+        "pre_ceo_speakers": "; ".join(evidence_labels(pre_candidates)),
+        "qa_ceo_speakers": "; ".join(evidence_labels(qa_candidates)),
         "shared_ceo_speakers": "; ".join(shared_labels),
         "within_call_identity_status": identity_status,
         "within_call_identity_ready": identity_ready,
@@ -636,7 +630,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "Speaker identity and Q&A-block quality are separate. No Q&A blocks were extracted or filtered in this step.",
             "A smoke run is a prefix sample for code validation only and has no episode- or turnover-level inference.",
         ],
-        "gate_version": "v1.2_scoped_acting_ceo_review_rule",
+        "gate_version": GATE_VERSION,
     }
     summary_path = args.output_dir / "speaker_gate_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")

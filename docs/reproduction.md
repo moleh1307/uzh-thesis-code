@@ -28,6 +28,16 @@ Required local helpers are retained: `extract_ccts_ceo_qa_blocks.py`,
 `validate_ccts_execucomp_speaker_identity.py`, and the measurement manifest
 builder below. Their import layout is preserved.
 
+The shared `ceo_title_evidence.py` helper retains every observed title per
+speaker key in both sections, with deterministic ordering. Special CEO roles
+are review flags even if another turn uses an ordinary CEO title. Concurrent
+Acting/Interim CFO labels do not, by themselves, imply a special CEO role.
+The speaker gate now declares `v1.3_complete_title_evidence_20261003`; strict
+anchored Q&A extraction requires this version and checks every label resolves
+to the same person. Saved v1.2 last-label gates cannot be retrospectively
+certified. A newly authorized source-backed gate rebuild is required before
+using this repair on research data; no real gate/sample was regenerated here.
+
 ## Measurement Stages
 
 All entries below are in `tools/llm_measurement/`.
@@ -39,7 +49,7 @@ All entries below are in `tools/llm_measurement/`.
 | `prepare_fresh_evaluation_human_package.py` | Blinded package creation; historical instructions need review |
 | `freeze_fresh_specificity_setup.py` | Protocol-specific prompt/settings/input archive |
 | `freeze_fresh_specificity_reference.py` | Protocol-specific label and missingness freeze |
-| `run_local_specificity.py` | Reviewed offline identity and full-output checks; retry repair still pending |
+| `run_local_specificity.py` | Reviewed offline identity, full-output checks and explicit bounded technical retry |
 | `audit_local_specificity_run.py` | Whole-raw/token/schema/provenance and repeat diagnostics |
 | `aggregate_local_specificity.py` | Historical word-weighted aggregation; sign/support adaptation pending |
 | `analyze_specificity_length_robustness.py` | Length sensitivity; current support and NumPy environment check pending |

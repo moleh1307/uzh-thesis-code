@@ -7,9 +7,10 @@ presentations (PRE) versus analyst Q&A, with externally anchored CEO changes.
 
 Prepared on 2026-10-03 from the existing research scripts. This is a migration
 baseline, not a completed analysis or a production scoring release. No model
-was run during preparation or targeted repairs. Issues #5, #1, #6, #2, #3 and #7 now have
-synthetic regression coverage for persistence, execution identity, full-output validation and diagnostics;
-the scoring runner still has known execution issues;
+was run during preparation or targeted repairs. Issues #5, #1, #6, #2, #3, #7,
+#14, #4 and #8 now have synthetic regression coverage for persistence,
+execution identity, full-output validation, bounded retries and title evidence;
+other pipeline issues remain open;
 see [known issues](docs/known-issues.md) before running it.
 
 ## Included
@@ -35,11 +36,8 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements-dev.txt
 .venv/bin/python -m unittest discover -s tools/ccts_database/tests -v
 .venv/bin/python -m unittest discover -s tests -v
-.venv/bin/python -m unittest discover -s tests/known_behavior -v
 ```
 
-The last suite characterizes the remaining technical-retry bug (#4) with fake inference.
-Its passing result confirms that bug still exists; it does not approve execution.
 Tests do not connect to a database, load weights, use a GPU or call an API.
 
 ## Reproduction And Workflow
