@@ -65,7 +65,7 @@ class FakeRunnerCase(unittest.TestCase):
                  special_prefix=False, resume=False, version="2.8.0+cu128",
                  error_on_call=None, interrupt_on_call=None, load_error=False,
                  eos=True, max_tokens=16, observe=None, penalty=1.05, beams=1,
-                 device="cpu", template="fixture", capture=False, min_new_tokens=0):
+                 device="cpu", template="fixture", capture=False, min_new_tokens=0, technical_retry=False):
         calls = []
         snapshots = []
         original_write = runner.atomic_json_write
@@ -122,7 +122,8 @@ class FakeRunnerCase(unittest.TestCase):
                     raise KeyboardInterrupt()
                 if error or error_on_call == len(calls):
                     raise RuntimeError("Synthetic inference failure")
-                return Tensor([1, 2] + ([8] if special_prefix else []) + [3, 4] + ([9] if eos else []))
+                body = [3] if eos and max_tokens == 2 else [3, 4]
+                return Tensor([1, 2] + ([8] if special_prefix else []) + body + ([9] if eos else []))
 
         def load_model(*args, **kwargs):
             assert kwargs["local_files_only"] and kwargs["trust_remote_code"] is False
@@ -151,6 +152,8 @@ class FakeRunnerCase(unittest.TestCase):
                 "migration_notes": {"inherited_checkpoint_generation": {"repetition_penalty": 1.05}}}))
         if resume:
             argv.append("--resume")
+        if technical_retry:
+            argv.append("--technical-retry")
         with patch.dict(sys.modules, {"torch": torch, "transformers": transformers}), \
              patch.object(sys, "argv", argv), patch.object(runner, "atomic_json_write", observed_write), \
              patch("local_execution_identity.platform.python_version", return_value="fixture"), \

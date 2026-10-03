@@ -23,7 +23,7 @@ from ccts_qa_episodes import collect_episode, procedure_kind, analyst_question_c
 CEO_RE = re.compile(r"\b(?:ceo|chief\s+executive\s+officer)\b", re.IGNORECASE)
 ANALYST_RE = re.compile(r"\banalyst\b", re.IGNORECASE)
 FORMER_CEO_RE = re.compile(r"\b(?:former|retired|ex[-\s])\b", re.IGNORECASE)
-SPECIAL_CEO_RE = re.compile(r"\b(?:interim|co[-\s]?ceo|co[-\s]?chief\s+executive)\b", re.IGNORECASE)
+from ceo_title_evidence import SPECIAL_CEO_RE, candidate_evidence, evidence_labels, shared_evidence
 OPERATOR_RE = re.compile(r"\boperator\b", re.IGNORECASE)
 CEO_ASSISTANT_RE = re.compile(r"\b(?:ceo\s+assistant|assistant\s+to\s+(?:the\s+)?ceo)\b", re.IGNORECASE)
 NEXT_QUESTION_RE = re.compile(
@@ -165,8 +165,8 @@ def event_metadata(rows: Sequence[Mapping[str, str]]) -> dict[str, str]:
     return {column: first.get(column, "") for column in EVENT_COLUMNS if column in first}
 
 
-def candidate_map(rows: Sequence[Mapping[str, str]]) -> dict[str, str]:
-    return {speaker_key(row): label(row) for row in rows if is_ceo(row) and speaker_key(row)}
+def candidate_map(rows: Sequence[Mapping[str, str]]) -> dict[str, tuple[str, ...]]:
+    return candidate_evidence(rows, is_ceo, speaker_key, label)
 
 
 def extract_event(rows: Sequence[Mapping[str, str]], *, participant_roles=None, validated_anchor_key=None, allow_anonymous_company_context=False) -> tuple[dict[str, str], list[dict[str, object]]]:
@@ -183,7 +183,7 @@ def extract_event(rows: Sequence[Mapping[str, str]], *, participant_roles=None, 
     pre_ceos = candidate_map(pre_rows)
     qa_ceos = candidate_map(qa_rows)
     shared_keys = sorted(set(pre_ceos) & set(qa_ceos))
-    shared_ceos = {key: qa_ceos[key] for key in shared_keys}
+    shared_ceos = {key: tuple(shared_evidence(pre_ceos, qa_ceos, [key])) for key in shared_keys}
     questioner = is_analyst
     eligible_questioner = is_analyst
     unresolved = None
@@ -210,7 +210,7 @@ def extract_event(rows: Sequence[Mapping[str, str]], *, participant_roles=None, 
         flags.append("NO_SAME_CEO_IDENTIFIED_IN_PRE_AND_QA")
     if len(shared_ceos) > 1:
         flags.append("MULTIPLE_SHARED_CEO_CANDIDATES")
-    for name in shared_ceos.values():
+    for name in evidence_labels(pre_ceos) + evidence_labels(qa_ceos):
         if SPECIAL_CEO_RE.search(name):
             flags.append("SPECIAL_CEO_TITLE")
 
@@ -359,8 +359,8 @@ def extract_event(rows: Sequence[Mapping[str, str]], *, participant_roles=None, 
         "year": meta.get("year", ""), "start_date": meta.get("start_date", ""),
         "company_name": meta.get("company_name", ""), "company_ticker": meta.get("company_ticker", ""),
         "event_title": meta.get("event_title", ""),
-        "pre_ceo_speakers": "; ".join(pre_ceos.values()), "qa_ceo_speakers": "; ".join(qa_ceos.values()),
-        "shared_ceo_speakers": "; ".join(shared_ceos.values()),
+        "pre_ceo_speakers": "; ".join(evidence_labels(pre_ceos)), "qa_ceo_speakers": "; ".join(evidence_labels(qa_ceos)),
+        "shared_ceo_speakers": "; ".join(evidence_labels(shared_ceos)),
         "qa_analyst_turn_count": sum(is_analyst(row) for row in qa_rows),
         "analyst_question_episodes": episodes, "eligible_ceo_qa_blocks": len(blocks),
         "high_quality_blocks": high_blocks, "event_audit_status": event_status,

@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from test_audit_run_status import completed
-from specificity_validation import SCHEMA, decode_evidence, digest, file_hash, strict_json
+from specificity_validation import SCHEMA, decode_evidence, digest, file_hash, strict_json, technical_retry_reason
 
 
 TOOLS = Path(__file__).resolve().parents[1] / "tools/llm_measurement"
@@ -37,7 +37,9 @@ class ConsumerContractTests(unittest.TestCase):
         self.output.write_text("".join(json.dumps(row) + "\n" for row in self.rows))
         self.run.write_text(json.dumps({"run_binding": binding, "run_binding_sha256": digest(binding),
             "contract": "synthetic", "input_sha256": file_hash(self.input),
-            "output_sha256": file_hash(self.output)}))
+            "output_sha256": file_hash(self.output), "retry_reservations": {
+                row["custom_id"]: {"attempt_number": 2, "retry_reason": row["retry_reason"]}
+                for row in self.rows if row.get("attempt_number") == 2}}))
 
     def consume(self, name):
         out = self.root / name
@@ -72,6 +74,68 @@ class ConsumerContractTests(unittest.TestCase):
             result, summary = self.consume(name)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(summary["provenance"]["verified"])
+
+    def retry_rows(self, second_valid=True):
+        original = completed(raw_output="invalid", raw_output_with_special_tokens="invalid<eos>")
+        second = completed() if second_valid else dict(original)
+        self.rows = [dict(original, attempt_number=1, retry_reason=None),
+                     dict(second, attempt_number=2, retry_reason=technical_retry_reason(original))]
+        self.bind()
+
+    def test_retry_recovery_retains_attempt_ledger_without_double_counting(self):
+        self.retry_rows()
+        for name in ("audit", "aggregate"):
+            result, summary = self.consume(name)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            ledger = summary["provenance"]["attempt_ledger"]
+            self.assertEqual(ledger["total_attempt_records"], 2)
+            self.assertEqual(ledger["unique_request_ids"], 1)
+            self.assertEqual(ledger["first_attempt_invalid_ids"], ["u1"])
+            self.assertEqual(ledger["retried_ids"], ["u1"])
+            field = "score_distribution_ok1" if name == "audit" else "model_score_distribution_ok1"
+            self.assertEqual(sum(summary[field].values()), 1)
+
+    def test_failed_retry_is_not_salvaged(self):
+        self.retry_rows(second_valid=False)
+        self.assert_invalid_both()
+
+    def test_retry_requires_manifest_reservation(self):
+        self.retry_rows()
+        manifest = json.loads(self.run.read_text())
+        manifest["retry_reservations"] = {}
+        self.run.write_text(json.dumps(manifest))
+        self.assert_provenance_rejected_both()
+
+    def test_first_attempt_binding_checked_even_after_recovery(self):
+        self.retry_rows()
+        self.rows[0]["run_binding_sha256"] = "unbound original"
+        self.output.write_text("".join(json.dumps(row) + "\n" for row in self.rows))
+        manifest = json.loads(self.run.read_text())
+        manifest["output_sha256"] = file_hash(self.output)
+        self.run.write_text(json.dumps(manifest))
+        for name in ("audit", "aggregate"):
+            result, summary = self.consume(name)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIsNone(summary)
+
+    def test_interrupted_retry_reservation_visible_without_new_output(self):
+        self.retry_rows()
+        self.rows = self.rows[:1]
+        self.bind()
+        manifest = json.loads(self.run.read_text())
+        manifest["retry_reservations"] = {"u1": {
+            "attempt_number": 2, "retry_reason": technical_retry_reason(self.rows[0])}}
+        self.run.write_text(json.dumps(manifest))
+        for name in ("audit", "aggregate"):
+            result, summary = self.consume(name)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertEqual(summary["provenance"]["attempt_ledger"]["reserved_retries_without_result"], ["u1"])
+
+    def test_reservation_for_successful_output_rejected(self):
+        manifest = json.loads(self.run.read_text())
+        manifest["retry_reservations"] = {"u1": {"attempt_number": 2, "retry_reason": "inference_error"}}
+        self.run.write_text(json.dumps(manifest))
+        self.assert_provenance_rejected_both()
 
     def test_raw_wrappers_trailing_duplicates_nonfinite_and_extra_fields_rejected(self):
         for raw in ('Answer: {"ok":1,"specificity":4}', '```json\n{"ok":1,"specificity":4}\n```',

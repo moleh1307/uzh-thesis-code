@@ -32,6 +32,7 @@ const elements = {
   nextButton: document.getElementById("next-button"),
   clearButton: document.getElementById("clear-button"),
   unscorableButton: document.getElementById("unscorable-button"),
+  sourceMissingButton: document.getElementById("source-missing-button"),
 };
 
 function currentRow() {
@@ -55,10 +56,10 @@ function applyFilter(preserveId = true) {
 
 function renderStats() {
   const stats = state.stats;
-  elements.progressCount.textContent = `${stats.scored || 0} / ${stats.total || 0}`;
-  elements.progressBar.style.width = stats.total ? `${(stats.scored / stats.total) * 100}%` : "0%";
-  elements.preCount.textContent = `${stats.pre_scored || 0} / ${stats.pre_total || 0}`;
-  elements.qaCount.textContent = `${stats.qa_scored || 0} / ${stats.qa_total || 0}`;
+  elements.progressCount.textContent = `${stats.reviewed || 0} / ${stats.total || 0}`;
+  elements.progressBar.style.width = stats.total ? `${(stats.reviewed / stats.total) * 100}%` : "0%";
+  elements.preCount.textContent = `${stats.pre_reviewed || 0} / ${stats.pre_total || 0}`;
+  elements.qaCount.textContent = `${stats.qa_reviewed || 0} / ${stats.qa_total || 0}`;
 }
 
 function renderSelection(label) {
@@ -66,6 +67,8 @@ function renderSelection(label) {
     button.classList.toggle("selected", Boolean(label && label.human_ok === 1 && Number(button.dataset.score) === label.human_specificity));
   });
   elements.unscorableButton.classList.toggle("selected", Boolean(label && label.human_ok === 0));
+  elements.sourceMissingButton.classList.toggle("selected", Boolean(label &&
+    label.human_content_class === "uncertain" && label.human_ok === "" && label.human_specificity === ""));
 }
 
 function render() {
@@ -106,8 +109,13 @@ async function saveLabel(humanOk, specificity, clear = false) {
   const row = currentRow();
   if (!row || state.saving) return;
   const contentClass = state.contentClassRequired ? elements.contentClass.value : "";
+  const notes = elements.notes.value.trim();
   if (!clear && state.contentClassRequired && !contentClass) {
     setSaveStatus("Select content class", true);
+    return;
+  }
+  if (!clear && contentClass === "uncertain" && humanOk === "" && specificity === "" && !notes) {
+    setSaveStatus("Source-quality reason required", true);
     return;
   }
   state.saving = true;
@@ -121,7 +129,7 @@ async function saveLabel(humanOk, specificity, clear = false) {
         human_ok: humanOk,
         human_specificity: specificity,
         human_content_class: contentClass,
-        human_notes: elements.notes.value.trim(),
+        human_notes: notes,
         clear,
       }),
     });
@@ -134,7 +142,7 @@ async function saveLabel(humanOk, specificity, clear = false) {
         human_ok: humanOk,
         human_specificity: specificity,
         human_content_class: contentClass,
-        human_notes: elements.notes.value.trim(),
+        human_notes: notes,
       };
     }
     state.stats = result.stats;
@@ -178,10 +186,15 @@ elements.unscorableButton.addEventListener("click", () => {
   if (state.contentClassRequired) elements.contentClass.value = "procedural_only";
   saveLabel(0, 0);
 });
+elements.sourceMissingButton.addEventListener("click", () => {
+  elements.contentClass.value = "uncertain";
+  saveLabel("", "");
+});
 elements.clearButton.addEventListener("click", () => saveLabel(null, null, true));
 elements.previousButton.addEventListener("click", () => move(-1));
 elements.nextButton.addEventListener("click", () => move(1));
-elements.notes.addEventListener("blur", () => {
+elements.notes.addEventListener("blur", (event) => {
+  if (event.relatedTarget?.closest(".score-button, #clear-button, #unscorable-button, #source-missing-button")) return;
   const row = currentRow();
   if (row?.label) saveLabel(row.label.human_ok, row.label.human_specificity);
 });
@@ -199,6 +212,7 @@ document.addEventListener("keydown", (event) => {
     saveLabel(1, Number(event.key));
   } else if (event.key.toLowerCase() === "u") {
     event.preventDefault();
+    if (state.contentClassRequired) elements.contentClass.value = "procedural_only";
     saveLabel(0, 0);
   } else if (event.key === "ArrowLeft") {
     event.preventDefault();
@@ -217,6 +231,8 @@ async function initialize() {
     state.rows = result.rows;
     state.stats = result.stats;
     state.contentClassRequired = Boolean(result.content_class_required);
+    elements.sourceMissingButton.hidden = !state.contentClassRequired;
+    elements.unscorableButton.textContent = state.contentClassRequired ? "Procedural only (0)" : "Unscorable";
     const savedId = localStorage.getItem("specificityAuditCurrentId");
     state.currentId = state.rows.some((row) => row.audit_id === savedId) ? savedId : null;
     applyFilter(true);

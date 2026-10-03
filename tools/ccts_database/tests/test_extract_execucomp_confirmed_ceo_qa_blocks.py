@@ -9,6 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from extract_execucomp_confirmed_ceo_qa_blocks import run_extraction
+from ceo_title_evidence import GATE_VERSION
 
 
 def write_csv(path: Path, rows: list[dict[str, str]]) -> None:
@@ -72,7 +73,7 @@ class ConfirmedCeoQaExtractionTests(unittest.TestCase):
         }])
         self.gate_summary.write_text(json.dumps({
             "status": "complete",
-            "gate_version": "v1.2_scoped_acting_ceo_review_rule",
+            "gate_version": GATE_VERSION,
             "candidate_events_total": 2,
             "event_gate_pass": 1,
             "turn_rows_scanned": 6,
@@ -112,6 +113,36 @@ class ConfirmedCeoQaExtractionTests(unittest.TestCase):
                 self.turns, self.event_gate, self.episode_gate, self.turnover_gate,
                 self.gate_summary, self.output, manual_audit_blocks=0,
             )
+        self.assertFalse(self.output.exists())
+
+    def test_preserved_title_variants_resolve_to_one_anchor(self) -> None:
+        with self.event_gate.open(encoding="utf-8", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        labels = "David Smith, Acme Inc - CEO; David Smith, Acme Inc - Chief Executive Officer"
+        rows[0]["matched_shared_speakers"] = labels
+        rows[0]["shared_ceo_speakers"] = labels
+        write_csv(self.event_gate, rows)
+        result = run_extraction(self.turns, self.event_gate, self.episode_gate,
+            self.turnover_gate, self.gate_summary, self.output, manual_audit_blocks=0)
+        self.assertEqual(result["blocks"]["candidate_blocks_total"], 1)
+
+    def test_rejects_second_person_hidden_after_first_anchor(self) -> None:
+        with self.event_gate.open(encoding="utf-8", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        rows[0]["matched_shared_speakers"] += "; Other Person, Acme Inc - CEO"
+        write_csv(self.event_gate, rows)
+        with self.assertRaisesRegex(ValueError, "inconsistent CEO anchor"):
+            run_extraction(self.turns, self.event_gate, self.episode_gate,
+                self.turnover_gate, self.gate_summary, self.output, manual_audit_blocks=0)
+        self.assertFalse(self.output.exists())
+
+    def test_old_last_label_gate_is_not_recertified(self) -> None:
+        summary = json.loads(self.gate_summary.read_text())
+        summary["gate_version"] = "v1.2"
+        self.gate_summary.write_text(json.dumps(summary))
+        with self.assertRaisesRegex(ValueError, "expected gate"):
+            run_extraction(self.turns, self.event_gate, self.episode_gate,
+                self.turnover_gate, self.gate_summary, self.output, manual_audit_blocks=0)
         self.assertFalse(self.output.exists())
 
 

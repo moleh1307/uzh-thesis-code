@@ -1,6 +1,9 @@
 import copy
+import csv
 import importlib.util
+import io
 import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -96,6 +99,31 @@ class FreshReferenceFreezeTests(unittest.TestCase):
         for data in [b"audit_id,audit_id\nx,y\n", b"audit_id,score\nx\n", b"audit_id,score\nx,4,5\n"]:
             with self.assertRaises(ValueError):
                 freezer.csv_rows(data)
+
+    def test_dashboard_export_preserves_frozen_missingness_contract(self):
+        import test_dashboard_persistence as persistence
+        dashboard = persistence.dashboard
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fields = dashboard.CONTENT_CLASS_AUDIT_COLUMNS
+            original = self.coded
+            self.blinded = [{k: row.get(k, "") for k in fields} for row in self.blinded]
+            source = root / "source.csv"
+            with source.open("w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fields)
+                writer.writeheader()
+                writer.writerows(self.blinded)
+            store = dashboard.AuditStore(source, root / "progress.json", root / "coded.csv")
+            for row in original:
+                payload = {k: row[k] for k in freezer.HUMAN_FIELDS}
+                payload["audit_id"] = row["audit_id"]
+                for k in ("human_ok", "human_specificity"):
+                    payload[k] = int(payload[k]) if payload[k] else ""
+                store.save(payload)
+            self.coded = list(csv.DictReader(io.StringIO(store.export_csv_text())))
+            ledger = self.validate()
+            self.assertEqual(ledger[52]["reference_state"], "source_uninterpretable")
+            self.assertEqual(sum(r["include_primary_numeric"] for r in ledger), 98)
 
 
 if __name__ == "__main__":

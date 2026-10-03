@@ -1,6 +1,6 @@
 # Known Issues And Readiness
 
-As of 2026-10-03. Targeted repairs address issues #5, #1, #6, #2, #3 and #7; this is not
+As of 2026-10-03. Targeted repairs address issues #5, #1, #6, #2, #3, #7, #14, #4 and #8; this is not
 production scoring approval. Prompt, schema and model settings are unchanged.
 
 ## Targeted Repairs
@@ -25,18 +25,25 @@ production scoring approval. Prompt, schema and model settings are unchanged.
 - #7: both consumers check whole raw JSON, stored parsed equality, token/EOS evidence,
   exact schema and input/output/unit-metadata run bindings. Old unbound results are
   refused, not retrospectively certified. See [details](execution-validation.md).
+- #14: reviewed source-uninterpretable annotations use `uncertain`, blank status
+  and score, and a required source-quality note. They persist/import/export as
+  reviewed missingness, distinct from unfinished rows and procedural zero.
+- #4: ordinary resume still skips recorded attempts. Explicit `--resume
+  --technical-retry` permits one additional same-settings technical attempt,
+  with append-only evidence and pre-inference reservations. Consumers select
+  the final attempt by ID, never by score, and retain first-failure ledgers.
+- #8: CEO candidates retain all observed per-person labels across PRE/Q&A.
+  Interim/acting/co-CEO evidence cannot be overwritten by a later ordinary
+  title; Acting CFO alone is not Acting CEO. The gate version changed; see
+  [reproduction](reproduction.md) before using a new gate.
 
 Synthetic regressions cover these repairs. They do not validate real scoring
 quality, authorize inference or repair the remaining issues below.
 
-## Runner Repairs Required Before Inference
+## Execution Limits
 
-1. #4: Resume skips previously failed IDs instead of performing the allowed
-   same-settings technical retry. Preserve both attempt records when repaired.
-
-`tests/known_behavior` reproduces these behaviors with fake inference. Convert
-these tests into correct-behavior regression tests when making each repair.
-Passing ordinary helper tests is not evidence that the full runner is sound.
+The old retry characterization test has been replaced by correct-behavior
+regressions with fake inference. Passing these tests is not production approval.
 
 The checkpoint inherits a repetition penalty of 1.05; it is now explicitly
 guarded, alongside greedy single-beam decoding, and disclosed in the effective config.
@@ -63,10 +70,7 @@ Do not launch inference from this code repair.
   start a new annotation round from generated historical instructions.
 - The settings JSON is consumed explicitly with `--settings`; its migration status
   still grants no execution approval. The reviewed profile is a separate required gate.
-- #14: the dashboard still cannot import/save reviewed source-uninterpretable
-  rows with blank scores; it rejects them rather than imputing a numerical zero.
-
-Other open findings (#8-#13 and historical #15-#16) are tracked on GitHub;
+Other open findings (#9-#13 and historical #15-#16) are tracked on GitHub;
 these targeted repairs do not imply those workflows have been corrected.
 
 Only a reviewed subset of historical tests is migrated. No claim is made that
