@@ -16,3 +16,29 @@ For long remote inference, the intended workflow is a named `screen` session,
 a log and atomic `status.json`: launch, detach, then inspect outputs later.
 The launcher is not implemented in this baseline. No CI job should access
 licensed databases, personal labels or shared compute.
+
+## Safe Dashboard And Direct CSV Editing
+
+The dashboard defaults to `--label-source dashboard`: existing coded CSV labels
+must agree with progress JSON. Startup conflicts leave both files unchanged;
+external edits while it runs stop saves/exports with HTTP 409. Do not edit the
+files concurrently with the dashboard.
+
+To use direct CSV edits, stop the dashboard, review the coded CSV, then restart
+explicitly with the same paths and `--label-source coded-csv`:
+
+```bash
+python3 tools/llm_measurement/human_audit_dashboard/server.py \
+  --input /path/to/blinded.csv \
+  --progress /path/to/progress.json \
+  --coded-csv /path/to/coded.csv \
+  --label-source coded-csv
+```
+
+The import validates source text, ordered IDs, schema and supported label
+combinations before writing. It imports all CSV annotations into progress,
+backs up conflicting old progress as `progress.json.backup-<UTC timestamp>`,
+and preserves other rows when a subsequent dashboard label is saved. It does
+not automatically merge conflicting files or choose by modification time.
+Source-uninterpretable blank annotations remain unsupported by this dashboard
+pending issue #14; invalid imports stop rather than coercing them to zero.

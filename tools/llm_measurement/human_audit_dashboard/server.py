@@ -127,11 +127,21 @@ def atomic_text_write(path: Path, content: str) -> None:
             os.unlink(temporary)
 
 
+class PersistenceConflict(ValueError):
+    """Stop before writing when annotation files disagree or change externally."""
+
+
 class AuditStore:
-    def __init__(self, input_path: Path, progress_path: Path, coded_csv_path: Path):
+    def __init__(self, input_path: Path, progress_path: Path, coded_csv_path: Path,
+                 *, label_source: str = "dashboard"):
         self.input_path = input_path.resolve()
         self.progress_path = progress_path.resolve()
         self.coded_csv_path = coded_csv_path.resolve()
+        if len({self.input_path, self.progress_path, self.coded_csv_path}) != 3:
+            raise PersistenceConflict("input, progress and coded CSV must be distinct files")
+        if label_source not in {"dashboard", "coded-csv"}:
+            raise ValueError("label_source must be dashboard or coded-csv")
+        self.label_source = label_source
         (
             self.rows,
             self.output_columns,
@@ -146,8 +156,28 @@ class AuditStore:
         self.created_at = utc_now()
         self.updated_at = self.created_at
         self._load_progress()
+        if self.coded_csv_path.exists():
+            csv_labels = self._read_coded_labels()
+            if label_source == "coded-csv":
+                if self.progress_path.exists() and self._label_values(csv_labels) != self._label_values(self.labels):
+                    backup = self.progress_path.with_name(
+                        self.progress_path.name + ".backup-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+                    )
+                    atomic_text_write(backup, self.progress_path.read_text(encoding="utf-8"))
+                self.labels = csv_labels
+                self.updated_at = utc_now()
+                self._write_progress()
+            elif self._label_values(csv_labels) != self._label_values(self.labels):
+                raise PersistenceConflict(
+                    "coded CSV and progress labels disagree (or CSV labels have no progress file); "
+                    "both files are unchanged. Review them, then use --label-source coded-csv "
+                    "only if the CSV is the intended source"
+                )
+        elif label_source == "coded-csv":
+            raise PersistenceConflict("--label-source coded-csv requires an existing coded CSV")
         if not self.coded_csv_path.exists():
             self._write_coded_csv()
+        self.file_hashes = self._file_hashes()
 
     def _load_progress(self) -> None:
         if not self.progress_path.exists():
@@ -160,10 +190,58 @@ class AuditStore:
         labels = data.get("labels", {})
         if not isinstance(labels, dict) or any(key not in self.rows_by_id for key in labels):
             raise SystemExit("progress file contains invalid audit IDs")
-        self.labels = labels
+        for audit_id, label in labels.items():
+            if not isinstance(label, dict) or "clear" in label:
+                raise PersistenceConflict("progress contains an invalid label")
+            try:
+                _, validated = self.validate_label(dict(label, audit_id=audit_id))
+            except ValueError as exc:
+                raise PersistenceConflict(f"invalid progress label for {audit_id}: {exc}") from exc
+            if validated is None:
+                raise PersistenceConflict("progress contains an invalid cleared label")
+            validated["saved_at"] = label.get("saved_at", validated["saved_at"])
+            self.labels[audit_id] = validated
         self.created_at = str(data.get("created_at") or self.created_at)
         self.updated_at = str(data.get("updated_at") or self.updated_at)
-        self._write_coded_csv()
+
+    def _label_values(self, labels: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        fields = [field for field in self.output_columns if field.startswith("human_")]
+        return {key: {field: label.get(field, "") for field in fields}
+                for key, label in labels.items()}
+
+    def _read_coded_labels(self) -> dict[str, dict[str, Any]]:
+        rows, columns, _, _, _ = read_rows(self.coded_csv_path)
+        if columns != self.output_columns or [row["audit_id"] for row in rows] != list(self.rows_by_id):
+            raise PersistenceConflict("coded CSV schema or ordered IDs differ from blinded input")
+        labels = {}
+        for row, source in zip(rows, self.rows):
+            if None in row or any(row.get(field) is None for field in columns):
+                raise PersistenceConflict("coded CSV contains an incomplete or extra-field row")
+            if any(row[field] != source[field] for field in columns if not field.startswith("human_")):
+                raise PersistenceConflict("coded CSV source text/metadata differs from blinded input")
+            fields = {field: row[field] for field in columns if field.startswith("human_")}
+            if not any(fields.values()):
+                continue
+            try:
+                payload = dict(fields, audit_id=row["audit_id"])
+                payload["human_ok"] = int(fields["human_ok"])
+                payload["human_specificity"] = int(fields["human_specificity"])
+                _, label = self.validate_label(payload)
+            except ValueError as exc:
+                raise PersistenceConflict(f"invalid coded CSV label for {row['audit_id']}: {exc}") from exc
+            labels[row["audit_id"]] = label
+        return labels
+
+    def _file_hashes(self) -> dict[Path, str | None]:
+        return {path: sha256(path) if path.exists() else None
+                for path in (self.input_path, self.progress_path, self.coded_csv_path)}
+
+    def _assert_files_unchanged(self) -> None:
+        if self._file_hashes() != self.file_hashes:
+            raise PersistenceConflict(
+                "annotation files changed outside this dashboard; save/export stopped without "
+                "overwriting them. Stop the dashboard and review/import the CSV explicitly"
+            )
 
     def validate_label(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
         audit_id = str(payload.get("audit_id", "")).strip()
@@ -212,15 +290,21 @@ class AuditStore:
         if audit_id not in self.rows_by_id:
             raise ValueError("unknown audit_id")
         with self.lock:
+            self._assert_files_unchanged()
             if label is None:
                 self.labels.pop(audit_id, None)
             else:
                 self.labels[audit_id] = label
             self.updated_at = utc_now()
             self._persist()
+            self.file_hashes = self._file_hashes()
             return self.stats()
 
     def _persist(self) -> None:
+        self._write_progress()
+        self._write_coded_csv()
+
+    def _write_progress(self) -> None:
         state = {
             "version": 1,
             "source_csv": str(self.input_path),
@@ -228,9 +312,14 @@ class AuditStore:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "labels": self.labels,
+            "label_source_at_startup": self.label_source,
         }
         atomic_text_write(self.progress_path, json.dumps(state, indent=2) + "\n")
-        self._write_coded_csv()
+
+    def export_csv_text(self) -> str:
+        with self.lock:
+            self._assert_files_unchanged()
+            return self._coded_csv_text()
 
     def _coded_csv_text(self) -> str:
         output = io.StringIO(newline="")
@@ -346,7 +435,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_json(self.app.store.public_state())
             return
         if path == "/api/export":
-            content = self.app.store._coded_csv_text().encode("utf-8")
+            try:
+                content = self.app.store.export_csv_text().encode("utf-8")
+            except PersistenceConflict as exc:
+                self.send_json({"error": str(exc)}, HTTPStatus.CONFLICT)
+                return
             self.send_bytes(
                 content,
                 "text/csv; charset=utf-8",
@@ -382,6 +475,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 raise ValueError("JSON object required")
             stats = self.app.store.save(payload)
             self.send_json({"ok": True, "stats": stats})
+        except PersistenceConflict as exc:
+            self.send_json({"error": str(exc)}, HTTPStatus.CONFLICT)
         except (ValueError, json.JSONDecodeError) as exc:
             self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
 
@@ -398,6 +493,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--progress", required=True, type=Path)
     parser.add_argument("--coded-csv", required=True, type=Path)
+    parser.add_argument("--label-source", choices=("dashboard", "coded-csv"), default="dashboard",
+                        help="default: require CSV/progress agreement; coded-csv: explicitly import CSV labels")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     return parser.parse_args()
@@ -406,7 +503,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     static_dir = Path(__file__).resolve().parent
-    store = AuditStore(args.input, args.progress, args.coded_csv)
+    try:
+        store = AuditStore(args.input, args.progress, args.coded_csv, label_source=args.label_source)
+    except PersistenceConflict as exc:
+        raise SystemExit(str(exc)) from exc
     server = DashboardServer((args.host, args.port), static_dir, store)
     print(
         json.dumps(
@@ -415,6 +515,7 @@ def main() -> int:
                 "input": str(args.input.resolve()),
                 "progress": str(args.progress.resolve()),
                 "coded_csv": str(args.coded_csv.resolve()),
+                "label_source": args.label_source,
                 "mode": (
                     "delayed_recode"
                     if store.id_column == "recode_id"
