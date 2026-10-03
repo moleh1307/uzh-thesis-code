@@ -64,6 +64,16 @@ All entries below are in `tools/llm_measurement/`.
 not started during repository preparation, and there is no request to score
 the existing sample again.
 
+New setup archives use `specificity_fresh100_complete_target_code_bundle_v2_20261003`.
+Their `code/tools/` tree preserves local imports and includes `csv_contract.py`.
+The freeze manifest lists three `code_entrypoints` and hashes every archived
+file recursively. Run `code/tools/llm_measurement/run_local_specificity.py` for
+archived validate-only checks; the freezer and human-package builder retain
+the same relative tree. Required source/proposal artifacts and any model/runtime
+dependencies remain separate. Archiving local code does not supply model weights,
+an approved execution profile or authorization to score. Historical flat archives
+are not rewritten or retrospectively declared standalone.
+
 ## Local Configuration
 
 Personal absolute paths were mechanically replaced in the copied code only:
