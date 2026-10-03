@@ -7,10 +7,11 @@ presentations (PRE) versus analyst Q&A, with externally anchored CEO changes.
 
 Prepared on 2026-10-03 from the existing research scripts. This is a migration
 baseline, not a completed analysis or a production scoring release. No model
-was run during preparation or targeted repairs. Issues #5, #1, #6, #2, #3, #7,
-#14, #4 and #8 now have synthetic regression coverage for persistence,
-execution identity, full-output validation, bounded retries and title evidence;
-other pipeline issues remain open;
+was run during preparation or targeted repairs. All sixteen tracked software
+findings have targeted repairs or explicit deprecation, backed by synthetic
+regressions. This includes issuer/tenure review gates, atomic census resume,
+manifest-ordered fetch materialization and standalone CSV limits. The retired
+PDF batch workflow is disabled, not restored or migrated;
 see [known issues](docs/known-issues.md) before running it.
 
 ## Included

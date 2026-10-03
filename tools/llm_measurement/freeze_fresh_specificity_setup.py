@@ -11,6 +11,11 @@ import shutil
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from csv_contract import configure_csv
+
+configure_csv()
 
 from prepare_fresh_evaluation_human_package import validate_source_checksums
 from run_local_specificity import sha256_path, validate_request

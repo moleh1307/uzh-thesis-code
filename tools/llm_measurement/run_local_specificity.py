@@ -17,6 +17,11 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from csv_contract import configure_csv
+
+configure_csv()
 from typing import Any
 
 from local_execution_identity import prepare_backend

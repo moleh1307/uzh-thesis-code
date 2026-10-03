@@ -17,6 +17,11 @@ import re
 from collections import Counter, defaultdict
 from datetime import date, datetime, timezone
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from csv_contract import configure_csv
+
+configure_csv()
 from typing import Any, Iterable, Mapping
 
 
@@ -146,18 +151,29 @@ def main() -> int:
 
     episode_rows: list[dict[str, Any]] = []
     for (gvkey, execid), rows in sorted(groups.items()):
-        all_became = [parsed for raw in values(rows, columns["becameceo"]) if (parsed := parse_date(raw))]
-        all_left = [parsed for raw in values(rows, columns["leftofc"]) if (parsed := parse_date(raw))]
         episodes = contiguous_episodes(rows, columns["year"])
         for episode_number, episode in enumerate(episodes, start=1):
             years = sorted(year for row in episode if (year := as_year(row.get(columns["year"], ""))) is not None)
             first_year, last_year = min(years), max(years)
-            start_candidates = [value for value in all_became if episode_number == 1 and int(value[:4]) <= first_year or first_year - 1 <= int(value[:4]) <= first_year + 1]
-            end_candidates = [value for value in all_left if last_year - 1 <= int(value[:4]) <= last_year + 1]
-            start = min(start_candidates) if start_candidates else f"{first_year}-01-01"
-            end = max(end_candidates) if end_candidates else f"{last_year}-12-31"
-            start_source = "becameceo_exact" if start_candidates else "ceoann_year_lower_bound"
-            end_source = "leftofc_exact" if end_candidates else "ceoann_year_upper_bound"
+            # Boundaries belong to this annual episode, not the executive's pooled career.
+            raw_starts = values(episode, columns["becameceo"])
+            raw_ends = values(episode, columns["leftofc"])
+            starts = {parse_date(value) for value in raw_starts}
+            ends = {parse_date(value) for value in raw_ends}
+            boundary_review = "" in starts or "" in ends or len(starts) > 1 or len(ends) > 1
+            starts.discard("")
+            ends.discard("")
+            boundary_review = boundary_review or any(
+                int(value[:4]) > last_year + 1 or (episode_number > 1 and int(value[:4]) < first_year - 1)
+                for value in starts) or any(int(value[:4]) < first_year - 1 for value in ends)
+            start = next(iter(starts)) if len(starts) == 1 else f"{first_year}-01-01"
+            end = next(iter(ends)) if len(ends) == 1 else f"{last_year}-12-31"
+            start_source = "becameceo_exact" if len(starts) == 1 else "ceoann_year_lower_bound"
+            end_source = "leftofc_exact" if len(ends) == 1 else "ceoann_year_upper_bound"
+            if boundary_review:
+                # Annual bounds are review placeholders, never a resolved conflict interval.
+                start, end = f"{first_year}-01-01", f"{last_year}-12-31"
+                start_source = end_source = "conflicting_or_invalid_source_boundary_review"
             sample = episode[-1]
             name = person_name(sample, columns)
             episode_rows.append({
@@ -172,6 +188,7 @@ def main() -> int:
                 "becameceo_values": ";".join(values(episode, columns["becameceo"])),
                 "leftofc_values": ";".join(values(episode, columns["leftofc"])),
                 "cusip_values": ";".join(values(episode, columns["cusip"])),
+                "boundary_review": boundary_review,
             })
 
     by_firm: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -195,7 +212,10 @@ def main() -> int:
         exact_start = row["start_date_source"] == "becameceo_exact"
         exact_end = row["end_date_source"] in {"leftofc_exact", "next_ceo_becameceo_exact"}
         invalid_date_order = date.fromisoformat(row["ceo_start_date"]) > date.fromisoformat(row["ceo_end_date"])
-        if invalid_date_order:
+        if row["boundary_review"]:
+            status = "source_boundary_conflict_review"
+            notes = "Different, invalid or episode-incompatible source boundaries remain unresolved; annual placeholders are not exact dates. No source value is selected as authoritative."
+        elif invalid_date_order:
             status = "invalid_date_order_review"
             notes = "ExecuComp exact/fiscal-year evidence yields a start date after the end date; preserve source values and exclude from automatic confirmation."
         elif exact_start and exact_end:

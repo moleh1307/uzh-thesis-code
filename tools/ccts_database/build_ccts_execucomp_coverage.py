@@ -16,6 +16,11 @@ import re
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from csv_contract import configure_csv
+
+configure_csv()
 
 
 OUTPUT_FIELDS = [
@@ -69,6 +74,13 @@ def true_value(value: object) -> bool:
     return clean(value).lower() in {"1", "true", "t", "yes", "y"}
 
 
+def is_exact_panel_row(row: dict[str, str]) -> bool:
+    return (row.get("issuer_match_status") == "exact_cusip8_single_gvkey"
+            and row.get("ceo_coverage_status") == "covered_exact_ceo_tenure"
+            and row.get("normalization_status") == "exact_tenure_dates"
+            and row.get("ceo_candidate_count") == "1" and bool(row.get("gvkey")))
+
+
 def write_csv(path: Path, rows: list[dict[str, str]], fields: list[str]) -> None:
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
@@ -114,7 +126,8 @@ def main() -> int:
                 issuer_status = "no_execucomp_cusip8_match"
             else:
                 gvkeys = {clean(row.get("gvkey")) for row in candidates}
-                issuer_status = "exact_cusip8_single_gvkey" if len(gvkeys) == 1 else "ambiguous_cusip8_multiple_gvkeys"
+                issuer_status = ("review_missing_execucomp_gvkey" if "" in gvkeys else
+                    "exact_cusip8_single_gvkey" if len(gvkeys) == 1 else "ambiguous_cusip8_multiple_gvkeys")
                 issuer_gvkeys[key].update(gvkeys)
 
             covering = [
@@ -123,6 +136,8 @@ def main() -> int:
             ]
             if not candidates:
                 coverage_status = "not_testable_no_issuer_match"
+            elif issuer_status != "exact_cusip8_single_gvkey":
+                coverage_status = "review_ambiguous_issuer_match"
             elif not date:
                 coverage_status = "review_missing_event_date"
             elif not covering:
@@ -145,6 +160,9 @@ def main() -> int:
             elif coverage_status == "covered_review_ceo_tenure":
                 confidence = "medium"
                 reason = "exact CUSIP8 issuer match; CEO tenure includes annual-bound or source-date review"
+            elif coverage_status == "review_ambiguous_issuer_match":
+                confidence = "review"
+                reason = "CUSIP8 issuer identity is missing or ambiguous; date coverage does not resolve the issuer bridge"
             elif coverage_status == "review_multiple_ceos_cover_event":
                 confidence = "review"
                 reason = "multiple normalized CEO episodes cover the same event date"
@@ -203,11 +221,11 @@ def main() -> int:
     write_csv(panel_path, panel, OUTPUT_FIELDS)
     exact_path = args.output_dir / "ccts_execucomp_exact_ceo_coverage.csv"
     review_path = args.output_dir / "ccts_execucomp_match_review.csv"
-    exact_rows = [row for row in panel if row["ceo_coverage_status"] == "covered_exact_ceo_tenure"]
+    exact_rows = [row for row in panel if is_exact_panel_row(row)]
     review_rows = [
         row for row in panel
-        if row["issuer_match_status"] == "exact_cusip8_single_gvkey"
-        and row["ceo_coverage_status"] != "covered_exact_ceo_tenure"
+        if row["issuer_match_status"] in {"exact_cusip8_single_gvkey", "ambiguous_cusip8_multiple_gvkeys", "review_missing_execucomp_gvkey"}
+        and not is_exact_panel_row(row)
     ]
     write_csv(exact_path, exact_rows, OUTPUT_FIELDS)
     write_csv(review_path, review_rows, OUTPUT_FIELDS)

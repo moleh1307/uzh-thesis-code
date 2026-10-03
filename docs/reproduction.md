@@ -38,6 +38,10 @@ to the same person. Saved v1.2 last-label gates cannot be retrospectively
 certified. A newly authorized source-backed gate rebuild is required before
 using this repair on research data; no real gate/sample was regenerated here.
 
+Issuer matching, tenure normalization, census and fetch resume guards are also
+repaired. Read [data integrity](data-integrity.md) before continuing any older
+data-stage output directory. Existing files are not automatically upgraded.
+
 ## Measurement Stages
 
 All entries below are in `tools/llm_measurement/`.
@@ -92,3 +96,5 @@ The initial migration excludes old PDF parsers, API cost experiments, model
 comparison screens, participant-assisted diagnostics, real-text historical
 tests and the uncertainty-dictionary benchmark. Add any needed component in a
 separate reviewed change, including its dependencies and licensing checks.
+The disabled compatibility entry point `tools/historical/ecc_run_parser_batches.py`
+is a tombstone, not a migrated PDF parser. Historical PDF commands are obsolete.

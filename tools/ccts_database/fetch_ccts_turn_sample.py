@@ -14,15 +14,19 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from csv_contract import configure_csv
+
+configure_csv()
 from typing import Any, Iterable, Mapping, Sequence
 
 import psycopg2
-
-csv.field_size_limit(64 * 1024 * 1024)
-
 
 DEFAULT_CREDENTIALS = Path("secrets/ccts_database_credentials.md")
 TURN_COLUMNS = [
@@ -337,21 +341,59 @@ def materialize_csv(
     checkpoint_dir: Path,
     checkpoints: Sequence[Mapping[str, Any]],
     kind: str,
+    event_order: Sequence[str] | None = None,
 ) -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = output_path.with_name(output_path.name + ".tmp")
     row_count = 0
-    with temporary.open("w", encoding="utf-8", newline="") as out_handle:
-        writer = csv.DictWriter(out_handle, fieldnames=columns, extrasaction="ignore")
-        writer.writeheader()
-        for checkpoint in checkpoints:
-            turns_path, audit_path, _ = checkpoint_paths(checkpoint_dir, checkpoint["key"])
-            shard_path = turns_path if kind == "turns" else audit_path
-            with shard_path.open("r", encoding="utf-8", newline="") as shard_handle:
-                for row in csv.DictReader(shard_handle):
-                    writer.writerow(row)
-                    row_count += 1
-    os.replace(temporary, output_path)
+    order = list(event_order) if event_order is not None else [event for shard in checkpoints for event in shard["event_ids"]]
+    positions = {event: rank for rank, event in enumerate(order)}
+    if len(positions) != len(order):
+        raise ValueError("duplicate manifest event order")
+    owned = set()
+    for checkpoint in checkpoints:
+        ids = checkpoint["event_ids"]
+        if len(set(ids)) != len(ids) or owned.intersection(ids) or not set(ids) <= positions.keys():
+            raise ValueError("duplicate or unexpected checkpoint event IDs")
+        owned.update(ids)
+    try:
+        # Disk-backed ordering keeps memory and open files bounded even for fragmented shards.
+        with tempfile.TemporaryDirectory(prefix=".fetch-order-", dir=output_path.parent) as stage:
+            db = sqlite3.connect(str(Path(stage) / "rows.sqlite"))
+            try:
+                db.execute("CREATE TABLE rows (rank INTEGER, ordinal INTEGER, payload TEXT)")
+                for checkpoint in checkpoints:
+                    turns_path, audit_path, _ = checkpoint_paths(checkpoint_dir, checkpoint["key"])
+                    shard_path = turns_path if kind == "turns" else audit_path
+                    allowed = set(checkpoint["event_ids"])
+                    audit_seen = set()
+                    with shard_path.open("r", encoding="utf-8", newline="") as shard_handle:
+                        reader = csv.DictReader(shard_handle)
+                        if reader.fieldnames != list(columns):
+                            raise ValueError("checkpoint CSV schema mismatch")
+                        for ordinal, row in enumerate(reader):
+                            event = row.get("event_id")
+                            if event not in allowed or None in row or any(value is None for value in row.values()):
+                                raise ValueError("unexpected or incomplete checkpoint row")
+                            if kind == "audit" and event in audit_seen:
+                                raise ValueError("duplicate audit event")
+                            audit_seen.add(event)
+                            db.execute("INSERT INTO rows VALUES (?, ?, ?)",
+                                       (positions[event], ordinal, json.dumps(row, ensure_ascii=False)))
+                    if kind == "audit" and audit_seen != allowed:
+                        raise ValueError("incomplete checkpoint audit coverage")
+                db.commit()
+                with temporary.open("w", encoding="utf-8", newline="") as out_handle:
+                    writer = csv.DictWriter(out_handle, fieldnames=columns, extrasaction="raise")
+                    writer.writeheader()
+                    for (payload,) in db.execute("SELECT payload FROM rows ORDER BY rank, ordinal"):
+                        writer.writerow(json.loads(payload))
+                        row_count += 1
+                os.replace(temporary, output_path)
+            finally:
+                db.close()
+    finally:
+        temporary.unlink(missing_ok=True)
     return row_count
 
 
@@ -410,8 +452,8 @@ def write_outputs(
     checkpoints = load_valid_checkpoints(checkpoint_dir, manifest_ids)
     turns_path = output_dir / "ccts_turns.csv"
     audit_path = output_dir / "ccts_turn_fetch_audit.csv"
-    turn_count = materialize_csv(turns_path, TURN_COLUMNS, checkpoint_dir, checkpoints, "turns")
-    materialize_csv(audit_path, AUDIT_COLUMNS, checkpoint_dir, checkpoints, "audit")
+    turn_count = materialize_csv(turns_path, TURN_COLUMNS, checkpoint_dir, checkpoints, "turns", manifest_ids)
+    materialize_csv(audit_path, AUDIT_COLUMNS, checkpoint_dir, checkpoints, "audit", manifest_ids)
     audits = read_csv(audit_path)
     scope_ids = set(scope_event_ids)
     scope_audits = [row for row in audits if row.get("event_id", "") in scope_ids]

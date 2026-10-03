@@ -14,6 +14,10 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from itertools import groupby
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from csv_contract import configure_csv
+
+configure_csv()
 
 from ccts_qa_episodes import procedure_kind, source_quality_reasons
 from extract_ccts_ceo_qa_blocks import clean, is_analyst, is_operator, join_turns, label, speaker_key, word_count
