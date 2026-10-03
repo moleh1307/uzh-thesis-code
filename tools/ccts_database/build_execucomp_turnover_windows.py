@@ -9,6 +9,12 @@ import json
 from collections import Counter, defaultdict
 from datetime import date, datetime, timezone
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from csv_contract import configure_csv
+
+configure_csv()
+from build_ccts_execucomp_coverage import is_exact_panel_row
 
 
 SEQUENCE_FIELDS = [
@@ -80,6 +86,9 @@ def main() -> int:
         raise SystemExit(f"output exists; pass --force to replace: {sequence_path}")
 
     events = read_csv(cfg.exact_event_panel)
+    for row in events:
+        if not is_exact_panel_row(row):
+            raise ValueError(f"event {row.get('event_id')} is not an unambiguous exact issuer/CEO match")
     tenures = read_csv(cfg.execucomp_tenures)
     calls_by_episode: dict[tuple[str, str, str], list[dict[str, str]]] = defaultdict(list)
     for row in events:

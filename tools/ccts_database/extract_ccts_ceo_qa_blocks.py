@@ -15,6 +15,11 @@ import re
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from csv_contract import configure_csv
+
+configure_csv()
 from typing import Any, Iterable, Mapping, Sequence
 
 from ccts_qa_episodes import collect_episode, procedure_kind, analyst_question_candidate, source_quality_reasons

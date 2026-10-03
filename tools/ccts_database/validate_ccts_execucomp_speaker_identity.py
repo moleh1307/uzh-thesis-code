@@ -10,6 +10,11 @@ import re
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from csv_contract import configure_csv
+
+configure_csv()
 
 
 FIELDS = [
@@ -100,6 +105,45 @@ def best(expected: str, values: list[str]) -> tuple[str, list[str]]:
     return quality, [value for kind, value in ranked if kind == quality]
 
 
+def pair_validation(rows):
+    sides = {row.get("turnover_side") for row in rows}
+    ids = [row.get("event_id", "") for row in rows]
+    reason = ""
+    if sides != {"old", "new"}:
+        reason = "missing_or_invalid_old_new_sides"
+    elif not all(ids) or len(set(ids)) != len(ids):
+        reason = "missing_or_duplicate_event_identity"
+    elif any(row.get("external_speaker_validation_status") != "confirmed_external_ceo_shared_pre_qa" for row in rows):
+        reason = "unconfirmed_event_speaker"
+    else:
+        identities = {}
+        for side in ("old", "new"):
+            support = [row for row in rows if row["turnover_side"] == side]
+            executives = {row.get("expected_execid", "") for row in support}
+            names = [row.get("expected_ceo_name", "") for row in support]
+            if len(executives) != 1 or not all(executives) or any(
+                    relation(names[0], name) not in {"exact_full_name", "same_first_last_middle_difference",
+                        "initial_prefix_plus_given_name", "initial_prefix_plus_recognized_nickname",
+                        "recognized_nickname_last_name", "recognized_transcription_variant"} for name in names):
+                reason = "missing_or_inconsistent_side_ceo_identity"
+                break
+            identities[side] = next(iter(executives))
+        if not reason and identities["old"] == identities["new"]:
+            reason = "same_executive_on_both_turnover_sides"
+        if not reason:
+            old_dates = [row.get("event_date", "") for row in rows if row["turnover_side"] == "old"]
+            new_dates = [row.get("event_date", "") for row in rows if row["turnover_side"] == "new"]
+            try:
+                old_dates = [datetime.fromisoformat(value).date() for value in old_dates]
+                new_dates = [datetime.fromisoformat(value).date() for value in new_dates]
+                if max(old_dates) >= min(new_dates):
+                    reason = "mislabelled_or_overlapping_side_dates"
+            except ValueError:
+                reason = "missing_or_invalid_side_dates"
+    return {"pair_validation_status": "review_or_mismatch" if reason else "confirmed_both_sides",
+            "pair_review_reason": reason}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--event-manifest", type=Path, required=True)
@@ -180,15 +224,14 @@ def main() -> int:
     for row in results:
         by_turnover.setdefault(row["turnover_id"], []).append(row)
     for turnover_id, rows in sorted(by_turnover.items()):
-        statuses = {row["external_speaker_validation_status"] for row in rows}
         pair_statuses.append({
             "turnover_id": turnover_id,
             "events": len(rows),
-            "pair_validation_status": "confirmed_both_sides" if statuses == {"confirmed_external_ceo_shared_pre_qa"} else "review_or_mismatch",
+            **pair_validation(rows),
         })
     pair_path = args.output_dir / "ccts_execucomp_turnover_pair_validation.csv"
     with pair_path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["turnover_id", "events", "pair_validation_status"])
+        writer = csv.DictWriter(handle, fieldnames=["turnover_id", "events", "pair_validation_status", "pair_review_reason"])
         writer.writeheader()
         writer.writerows(pair_statuses)
     summary = {

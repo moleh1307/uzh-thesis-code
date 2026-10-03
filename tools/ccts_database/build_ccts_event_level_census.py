@@ -18,14 +18,25 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import re
+import shutil
 import time
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from csv_contract import configure_csv
+
+configure_csv()
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, MutableMapping, Sequence, Tuple
 
 import psycopg2
+from census_checkpoint import (
+    CountCheckpoint, digest, file_hash, prepare_run, read_counts,
+    publish_metadata, recover_metadata,
+)
 
 
 DEFAULT_CREDENTIALS = Path(
@@ -151,20 +162,8 @@ def write_csv(path: Path, columns: Sequence[str], rows: Iterable[Sequence[Any]])
         for row in rows:
             writer.writerow([clean_cell(value) for value in row])
             count += 1
-    return count
-
-
-def append_csv(path: Path, columns: Sequence[str], rows: Iterable[Sequence[Any]]) -> int:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    exists = path.exists() and path.stat().st_size > 0
-    count = 0
-    with path.open("a", encoding="utf-8", newline="") as handle:
-        writer = csv.writer(handle)
-        if not exists:
-            writer.writerow(columns)
-        for row in rows:
-            writer.writerow([clean_cell(value) for value in row])
-            count += 1
+        handle.flush()
+        os.fsync(handle.fileno())
     return count
 
 
@@ -174,37 +173,10 @@ def clean_cell(value: Any) -> Any:
     return value
 
 
-def read_processed_event_ids(path: Path) -> set[int]:
-    if not path.exists() or path.stat().st_size == 0:
-        return set()
-    processed: set[int] = set()
-    with path.open("r", encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle)
-        for row in reader:
-            if row.get("event_id"):
-                processed.add(int(row["event_id"]))
-    return processed
-
-
 def read_count_file(path: Path, columns: Sequence[str]) -> Dict[int, Dict[str, Any]]:
-    out: Dict[int, Dict[str, Any]] = {}
     if not path.exists():
-        return out
-    with path.open("r", encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle)
-        for row in reader:
-            event_id = int(row["event_id"])
-            parsed: Dict[str, Any] = {}
-            for col in columns:
-                value = row.get(col, "")
-                if col == "event_id":
-                    continue
-                if col in {"text_types"}:
-                    parsed[col] = value
-                else:
-                    parsed[col] = int(value or 0)
-            out[event_id] = parsed
-    return out
+        return {}
+    return read_counts(path, columns, None)
 
 
 def truthy(value: Any) -> bool:
@@ -592,11 +564,15 @@ def count_rows_for_events(
     batch_size: int,
     label: str,
     progress_every: int,
+    source_binding: Mapping[str, Any] | None = None,
 ) -> None:
-    processed = read_processed_event_ids(output_path)
+    store = CountCheckpoint(output_path, columns, event_ids, source_binding or {
+        "query": query_fn.__name__, "code_sha256": file_hash(Path(__file__))})
+    processed = set(store.counts)
     remaining = [event_id for event_id in event_ids if event_id not in processed]
     total = len(event_ids)
     if not remaining:
+        store.materialize()
         print(f"{label}: already complete ({len(processed):,}/{total:,})", flush=True)
         return
 
@@ -611,12 +587,8 @@ def count_rows_for_events(
                 flush=True,
             )
         batch_counts = query_fn(cur, batch)
-        rows: List[List[Any]] = []
-        for event_id in batch:
-            values = batch_counts.get(event_id, {})
-            rows.append([event_id] + [values.get(col, 0 if col != "text_types" else "") for col in columns[1:]])
-        append_csv(output_path, columns, rows)
-        written += len(rows)
+        store.commit(batch, batch_counts)
+        written += len(batch)
         done = len(processed) + written
         if batch_number == 1 or done % progress_every < batch_size or done == total:
             elapsed = time.time() - started
@@ -626,6 +598,7 @@ def count_rows_for_events(
                 f"({rate:.1f} events/sec in this run)",
                 flush=True,
             )
+    store.materialize()
 
 
 def safe_int(value: Any) -> int:
@@ -644,6 +617,14 @@ def build_final_table(
     summary = Counter()
     by_year: Dict[int, Counter] = defaultdict(Counter)
     final_columns = FINAL_SECTION_COLUMNS if section_only else FINAL_COLUMNS
+    expected = {int(row[0]) for row in metadata_rows}
+    text_columns = TEXT_SECTION_COUNT_COLUMNS if section_only else TEXT_COUNT_COLUMNS
+    part_columns = PARTICIPANT_SECTION_COUNT_COLUMNS if section_only else PARTICIPANT_COUNT_COLUMNS
+    for counts, columns in ((text_counts, text_columns), (participant_counts, part_columns)):
+        if set(counts) != expected or any(set(row) != set(columns[1:]) or any(
+                value is None or (value == "" and col != "text_types") for col, value in row.items())
+                for row in counts.values()):
+            raise ValueError("incomplete census stage; uncomputed signals cannot become zero")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
@@ -683,7 +664,8 @@ def build_final_table(
             summary["pre_only"] += pre_only
             summary["qa_only"] += qa_only
             summary["no_text_rows"] += no_text_rows
-            summary["possible_qa_dialogue_encoded_as_pre"] += possible_pre_encoded
+            if not section_only:
+                summary["possible_qa_dialogue_encoded_as_pre"] += possible_pre_encoded
             if not section_only:
                 summary["text_name_ceo_signal_events"] += int(
                     safe_int(text.get("pre_text_name_ceo_signal_rows"))
@@ -710,7 +692,8 @@ def build_final_table(
             bucket["pre_only"] += pre_only
             bucket["qa_only"] += qa_only
             bucket["no_text_rows"] += no_text_rows
-            bucket["possible_qa_dialogue_encoded_as_pre"] += possible_pre_encoded
+            if not section_only:
+                bucket["possible_qa_dialogue_encoded_as_pre"] += possible_pre_encoded
 
             if section_only:
                 writer.writerow(
@@ -747,7 +730,7 @@ def build_final_table(
     return summary
 
 
-def write_by_year(path: Path, by_year: Mapping[int, Counter]) -> None:
+def write_by_year(path: Path, by_year: Mapping[int, Counter], *, section_only=False) -> None:
     rows: List[List[Any]] = []
     for year, bucket in sorted(by_year.items()):
         events = max(1, bucket["events"])
@@ -762,7 +745,7 @@ def write_by_year(path: Path, by_year: Mapping[int, Counter]) -> None:
                 bucket["pre_only"],
                 bucket["qa_only"],
                 bucket["no_text_rows"],
-                bucket["possible_qa_dialogue_encoded_as_pre"],
+                "" if section_only else bucket["possible_qa_dialogue_encoded_as_pre"],
                 round(100 * bucket["has_both_pre_and_qa"] / events, 2),
             ]
         )
@@ -821,6 +804,8 @@ def main() -> int:
         help="Only compute metadata, PRE/Q&A row counts, section flags, and participant row counts. Skip full role/title signal counts.",
     )
     args = parser.parse_args()
+    if args.batch_size < 1 or (args.limit_events is not None and args.limit_events < 1):
+        parser.error("batch size and limit must be positive")
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     output_dir = args.output_dir or (DEFAULT_OUTPUT_ROOT / f"v1_{timestamp}")
@@ -833,11 +818,20 @@ def main() -> int:
     by_year_path = output_dir / "event_level_section_census_by_year.csv"
     summary_path = output_dir / "event_level_census_summary.json"
     report_path = output_dir / "event_level_census_summary.md"
+    config_path = output_dir / "census_run_config.json"
+    text_columns = TEXT_SECTION_COUNT_COLUMNS if args.section_only else TEXT_COUNT_COLUMNS
+    participant_columns = PARTICIPANT_SECTION_COUNT_COLUMNS if args.section_only else PARTICIPANT_COUNT_COLUMNS
+    protected = [metadata_path, metadata_path.with_suffix(".tmp"), text_counts_path, participant_counts_path, final_path,
+                 by_year_path, summary_path, report_path,
+                 *[path.with_suffix(suffix) for path in (text_counts_path, participant_counts_path)
+                   for suffix in (".checkpoints", ".checkpoint.json")]]
 
     if args.force:
-        for path in [metadata_path, text_counts_path, participant_counts_path, final_path, by_year_path, summary_path, report_path]:
-            if path.exists():
-                path.unlink()
+        for path in [*protected, config_path]:
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink(missing_ok=True)
 
     creds = read_credentials(args.credentials)
     event_id_filter = read_event_id_filter(
@@ -851,6 +845,35 @@ def main() -> int:
         args.event_id_filter_value,
         args.limit_events,
     )
+    binding = {"schema": 1, "section_only": args.section_only, "min_year": args.min_year,
+               "limit_events": args.limit_events, "standard_earning_type": STANDARD_EARNING_TYPE,
+               "source": {key: creds[key] for key in ("host", "dbname", "user")},
+               "sslmode": args.sslmode,
+               "event_id_csv_sha256": file_hash(args.event_id_csv) if args.event_id_csv else None,
+               "event_id_filter_column": args.event_id_filter_column,
+               "event_id_filter_value": args.event_id_filter_value,
+               "text_columns": text_columns, "participant_columns": participant_columns,
+               "runner_sha256": file_hash(Path(__file__)),
+               "checkpoint_code_sha256": file_hash(Path(__file__).with_name("census_checkpoint.py"))}
+    run_config = prepare_run(config_path, binding, protected)
+    recover_metadata(metadata_path, metadata_path.with_suffix(".tmp"), config_path, run_config)
+    saved_metadata = None
+    if metadata_path.exists():
+        if run_config.get("metadata_sha256") != file_hash(metadata_path):
+            raise ValueError("saved census metadata identity mismatch")
+        with metadata_path.open(newline="", encoding="utf-8") as handle:
+            reader = csv.reader(handle)
+            if next(reader, None) != METADATA_COLUMNS:
+                raise ValueError("saved census metadata schema mismatch")
+            saved_metadata = list(reader)
+        if any(len(row) != len(METADATA_COLUMNS) for row in saved_metadata):
+            raise ValueError("incomplete saved metadata")
+        saved_ids = [int(row[0]) for row in saved_metadata]
+        for path, columns in ((text_counts_path, text_columns), (participant_counts_path, participant_columns)):
+            CountCheckpoint(path, columns, saved_ids, {"run_binding_sha256": digest(binding),
+                "metadata_sha256": run_config["metadata_sha256"]}, create=False)
+    elif run_config.get("metadata_sha256") is not None:
+        raise ValueError("bound census metadata is missing")
     if event_id_filter is not None:
         print(
             f"loaded event-id filter: {len(event_id_filter):,} event_ids from {args.event_id_csv}",
@@ -899,7 +922,18 @@ def main() -> int:
                 )
             else:
                 metadata_rows = fetch_metadata(cur, args.min_year, args.limit_events)
-            write_csv(metadata_path, METADATA_COLUMNS, metadata_rows)
+            canonical_metadata = [[str(clean_cell(value)) if value is not None else "" for value in row]
+                                  for row in metadata_rows]
+            event_ids = [int(row[0]) for row in metadata_rows]
+            if len(set(event_ids)) != len(event_ids) or any(event <= 0 for event in event_ids):
+                raise ValueError("duplicate or invalid metadata IDs")
+            if saved_metadata is not None and saved_metadata != canonical_metadata:
+                raise ValueError("database/local metadata scope changed; checkpoint left unchanged")
+            if saved_metadata is None:
+                stage = metadata_path.with_suffix(".tmp")
+                write_csv(stage, METADATA_COLUMNS, metadata_rows)
+                publish_metadata(metadata_path, stage, config_path, run_config)
+            count_binding = {"run_binding_sha256": digest(binding), "metadata_sha256": run_config["metadata_sha256"]}
             event_ids = [int(row[0]) for row in metadata_rows]
             print(f"metadata: {len(event_ids):,} practical standard earnings events", flush=True)
 
@@ -929,6 +963,7 @@ def main() -> int:
                 query_fn=query_text_section_counts if args.section_only else query_text_counts,
                 batch_size=args.batch_size,
                 label="text counts",
+                source_binding=count_binding,
                 progress_every=max(args.batch_size * 20, 5000),
             )
 
@@ -943,6 +978,7 @@ def main() -> int:
                 # slow first query cannot make an entire long run look stalled.
                 batch_size=args.batch_size,
                 label="participant counts",
+                source_binding=count_binding,
                 progress_every=max(args.batch_size * 20, 5000),
             )
     finally:
@@ -956,7 +992,7 @@ def main() -> int:
         metadata_rows, text_counts, participant_counts, final_path, section_only=args.section_only
     )
     by_year = summary_counter.pop("_by_year")  # type: ignore[assignment]
-    write_by_year(by_year_path, by_year)  # type: ignore[arg-type]
+    write_by_year(by_year_path, by_year, section_only=args.section_only)  # type: ignore[arg-type]
 
     events = max(1, int(summary_counter["events"]))
     summary: Dict[str, Any] = {
@@ -982,7 +1018,7 @@ def main() -> int:
             "pct_has_both_pre_and_qa": round(100 * summary_counter["has_both_pre_and_qa"] / events, 2),
             "pct_possible_qa_dialogue_encoded_as_pre": round(
                 100 * summary_counter["possible_qa_dialogue_encoded_as_pre"] / events, 2
-            ),
+            ) if not args.section_only else None,
         },
         "artifacts": {
             "metadata_standard_earnings_practical_csv": str(metadata_path),
@@ -1030,7 +1066,7 @@ def main() -> int:
                 f"- PRE-only events: {summary['counts']['pre_only']:,}",
                 f"- Q&A-only events: {summary['counts']['qa_only']:,}",
                 f"- Events with no text rows: {summary['counts']['no_text_rows']:,}",
-                f"- Diagnostic possible Q&A encoded as PRE: {summary['counts']['possible_qa_dialogue_encoded_as_pre']:,} ({summary['percentages']['pct_possible_qa_dialogue_encoded_as_pre']}%)",
+                "- Diagnostic possible Q&A encoded as PRE: not computed in section-only mode." if args.section_only else f"- Diagnostic possible Q&A encoded as PRE: {summary['counts']['possible_qa_dialogue_encoded_as_pre']:,} ({summary['percentages']['pct_possible_qa_dialogue_encoded_as_pre']}%)",
                 "",
                 "## Role/Title Signal Coverage",
                 "",

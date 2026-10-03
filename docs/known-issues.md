@@ -1,6 +1,6 @@
 # Known Issues And Readiness
 
-As of 2026-10-03. Targeted repairs address issues #5, #1, #6, #2, #3, #7, #14, #4 and #8; this is not
+As of 2026-10-03. Targeted repairs or explicit deprecation address all sixteen tracked findings; this is not
 production scoring approval. Prompt, schema and model settings are unchanged.
 
 ## Targeted Repairs
@@ -36,9 +36,31 @@ production scoring approval. Prompt, schema and model settings are unchanged.
   Interim/acting/co-CEO evidence cannot be overwritten by a later ordinary
   title; Acting CFO alone is not Acting CEO. The gate version changed; see
   [reproduction](reproduction.md) before using a new gate.
+- #9: exact CEO panels require one nonempty GVKEY for the CUSIP8 bridge and
+  one covering exact tenure. Multiple/missing issuer identities stay in review,
+  even if only one tenure covers the date; turnover windows recheck the guard.
+- #10: tenure boundaries are parsed and checked within each contiguous annual
+  episode. Equivalent date formats agree; conflicting, invalid or incompatible
+  values remain in the raw-value audit and cannot be selected as exact min/max.
+- #11: census runs bind mode, schemas, ordered event scope, filter bytes,
+  database identity and code. Validated atomic count batches commit with hash
+  markers; incomplete cells, duplicates and incompatible/unbound checkpoints
+  are rejected. Uncomputed section-only signals are blank/absent/null, not zero.
+- #12: fetched turns and audits materialize in manifest event order even when
+  replacement batches span gaps between old shards. Within-event row order is
+  retained; temporary disk-backed sorting avoids loading full transcript text.
+- #13: each standalone CSV entry point configures the shared decoded-character
+  bound of 64 Mi characters. Larger fields fail explicitly, never truncate.
+- #15 (historical CLI): both sides require distinct confirmed events, consistent
+  intended CEO identities, different executives and old-before-new call dates.
+  Missing, duplicate, mislabelled or inconsistent support remains in review.
+- #16 (historical PDF): deprecation option selected. The public compatibility
+  entry point refuses every invocation without changing files. Archived private
+  scripts are reference-only, not repaired or certified for future resume.
 
 Synthetic regressions cover these repairs. They do not validate real scoring
-quality, authorize inference or repair the remaining issues below.
+quality or authorize inference. See [data integrity](data-integrity.md) for
+resume compatibility and historical-workflow limits.
 
 ## Execution Limits
 
@@ -70,8 +92,8 @@ Do not launch inference from this code repair.
   start a new annotation round from generated historical instructions.
 - The settings JSON is consumed explicitly with `--settings`; its migration status
   still grants no execution approval. The reviewed profile is a separate required gate.
-Other open findings (#9-#13 and historical #15-#16) are tracked on GitHub;
-these targeted repairs do not imply those workflows have been corrected.
+Closing tracked software findings does not resolve these scientific/protocol
+limitations or certify historical outputs. No real-data regeneration occurred.
 
 Only a reviewed subset of historical tests is migrated. No claim is made that
 all original tests or the entire research pipeline are reproduced here.

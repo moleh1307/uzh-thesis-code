@@ -10,6 +10,11 @@ import json
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from csv_contract import configure_csv
+
+configure_csv()
 
 
 SSD_ROOT = Path("data")

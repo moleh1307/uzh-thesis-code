@@ -14,6 +14,11 @@ import tempfile
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from csv_contract import configure_csv
+
+configure_csv()
 
 
 HUMAN_FIELDS = {"human_content_class", "human_ok", "human_specificity", "human_notes"}

@@ -15,6 +15,11 @@ from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from csv_contract import configure_csv
+
+configure_csv()
 from typing import Any
 from urllib.parse import urlparse
 
