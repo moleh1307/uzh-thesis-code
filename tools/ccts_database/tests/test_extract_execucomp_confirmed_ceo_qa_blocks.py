@@ -1,15 +1,22 @@
 import csv
+import contextlib
 import hashlib
+import io
 import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from extract_execucomp_confirmed_ceo_qa_blocks import run_extraction
+import extract_execucomp_confirmed_ceo_qa_blocks as consumer
 from ceo_title_evidence import GATE_VERSION
+import build_ccts_execucomp_speaker_gate as producer
+from speaker_gate_contract import INPUT_NAMES, sha256_file
 
 
 def write_csv(path: Path, rows: list[dict[str, str]]) -> None:
@@ -62,27 +69,63 @@ class ConfirmedCeoQaExtractionTests(unittest.TestCase):
             {"sample_rank": "2", "event_id": "101", "start_date": "2020-06-15", "year": "2020", "company_name": "Acme Inc", "company_ticker": "ACM", "event_title": "Q2 call", "sequence_id": "10", "raw_sequence_id": "10", "source_event_company_name": "Acme Inc", "text_type": "Q&A", "analysis_text_type": "Q&A", "text_name": "Jordan Jones, Bank - Analyst [10]", "text_contents": "What is the outlook?", "deduplication_status": "unchanged", "source_event_company_names_json": "[\"Acme Inc\"]"},
         ]
         write_csv(self.turns, turn_rows)
-        write_csv(self.event_gate, [gate_row("100", passed=True), gate_row("101", passed=False)])
-        write_csv(self.episode_gate, [
-            {"gvkey": "000001", "expected_execid": "1", "tenure_episode": "1", "episode_analysis_gate_pass": "1"},
-            {"gvkey": "000001", "expected_execid": "2", "tenure_episode": "1", "episode_analysis_gate_pass": "0"},
-        ])
-        write_csv(self.turnover_gate, [{
+        assignments = []
+        for row in (gate_row("100", passed=True), gate_row("101", passed=False)):
+            assignments.append({"event_id": row["event_id"], "gvkey": row["gvkey"],
+                                "execid": row["expected_execid"], "tenure_episode": "1",
+                                "event_date": "2020-03-15" if row["event_id"] == "100" else "2020-06-15",
+                                "calendar_quarter": "2020Q1" if row["event_id"] == "100" else "2020Q2",
+                                "turnover_ids": "turnover_1"})
+        source_rows = {
+            "event_assignments": assignments,
+            "episode_manifest": [{"gvkey": "000001", "execid": str(i), "tenure_episode": "1",
+                                  "calls_in_source_panel": "1", "distinct_quarters_in_source_panel": "1"}
+                                 for i in (1, 2)],
+            "turnover_episode_map": [{"turnover_id": "turnover_1", "side": side,
+                                      "gvkey": "000001", "execid": str(i), "tenure_episode": "1"}
+                                     for i, side in ((1, "old_episode"), (2, "new_episode"))],
+            "turnover_pairs": [{
             "turnover_id": "turnover_1", "gvkey": "000001", "old_execid": "1", "old_tenure_episode": "1",
-            "new_execid": "2", "new_tenure_episode": "1", "turnover_analysis_gate_pass": "0",
-        }])
-        self.gate_summary.write_text(json.dumps({
+            "new_execid": "2", "new_tenure_episode": "1", "transition_gap_days": "90",
+            }],
+            "execucomp_normalized": [{"gvkey": "000001", "execid": str(i), "tenure_episode": "1",
+                                      "person_name": name}
+                                     for i, name in ((1, "David Smith"), (2, "Other Person"))],
+            "call_sequences": [{**row, "ceo_name": name} for row, name in
+                               zip(assignments, ("David Smith", "Other Person"))],
+            "fetch_audit": [{"event_id": str(i), "fetch_status": "ok", "fetch_notes": ""}
+                            for i in (100, 101)],
+        }
+        parameters = {"turns": self.turns, "output_dir": self.root / "gate",
+                      "minimum_confirmed_calls": 1, "minimum_confirmed_quarters": 1,
+                      "limit_events": None}
+        for name, rows in source_rows.items():
+            parameters[name] = self.root / (name + ".csv")
+            write_csv(parameters[name], rows)
+        parameters["resolution_audit"] = self.root / "resolution.csv"
+        parameters["resolution_audit"].write_text("event_id\n")
+        parameters["dedup_summary"] = self.root / "dedup.json"
+        parameters["dedup_summary"].write_text(json.dumps({
             "status": "complete",
-            "gate_version": GATE_VERSION,
-            "candidate_events_total": 2,
-            "event_gate_pass": 1,
-            "turn_rows_scanned": 6,
-            "episode_gate_pass": 1,
-            "episode_gate_fail": 1,
-            "turnover_gate_pass": 0,
-            "turnover_gate_fail": 1,
-            "provenance": {"turns_sha256_verified": hashlib.sha256(self.turns.read_bytes()).hexdigest()},
-        }), encoding="utf-8")
+            "input_events": 2, "output_rows": 6, "unique_event_sequence_keys": 6,
+            "raw_input_modified": False, "review_event_ids_resolved": [],
+            "resolution_audit_rows": 0, "duplicate_rows_collapsed": 0,
+            "output_sha256": hashlib.sha256(self.turns.read_bytes()).hexdigest(),
+        }))
+        self.producer_args = SimpleNamespace(**parameters)
+        with contextlib.redirect_stdout(io.StringIO()):
+            producer.run(self.producer_args)
+        self.event_gate = parameters["output_dir"] / "event_speaker_gate.csv"
+        self.episode_gate = parameters["output_dir"] / "episode_speaker_gate.csv"
+        self.turnover_gate = parameters["output_dir"] / "turnover_speaker_gate.csv"
+        self.gate_summary = parameters["output_dir"] / "speaker_gate_summary.json"
+
+    def refresh_artifact_hashes(self):
+        summary = json.loads(self.gate_summary.read_text())
+        summary["artifact_sha256"] = {name: sha256_file(path) for name, path in (
+            ("event_speaker_gate_csv", self.event_gate), ("episode_speaker_gate_csv", self.episode_gate),
+            ("turnover_speaker_gate_csv", self.turnover_gate))}
+        self.gate_summary.write_text(json.dumps(summary))
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -100,7 +143,8 @@ class ConfirmedCeoQaExtractionTests(unittest.TestCase):
             blocks = list(csv.DictReader(handle))
         self.assertEqual(len(blocks), 1)
         self.assertEqual(blocks[0]["event_id"], "100")
-        self.assertEqual(blocks[0]["validated_ceo_speaker"], "David Smith, Acme Inc - CEO")
+        self.assertEqual(blocks[0]["validated_ceo_speaker"],
+                         "David Smith, Acme Inc - CEO; David Smith, Acme Inc - Chief Executive Officer")
         self.assertIn("ten percent", blocks[0]["ceo_answer"])
 
     def test_refuses_gate_anchor_inconsistent_with_shared_speaker(self) -> None:
@@ -108,6 +152,7 @@ class ConfirmedCeoQaExtractionTests(unittest.TestCase):
             rows = list(csv.DictReader(handle))
         rows[0]["matched_shared_speakers"] = "Different Person, Acme Inc - CEO"
         write_csv(self.event_gate, rows)
+        self.refresh_artifact_hashes()
         with self.assertRaisesRegex(ValueError, "inconsistent CEO anchor"):
             run_extraction(
                 self.turns, self.event_gate, self.episode_gate, self.turnover_gate,
@@ -122,6 +167,7 @@ class ConfirmedCeoQaExtractionTests(unittest.TestCase):
         rows[0]["matched_shared_speakers"] = labels
         rows[0]["shared_ceo_speakers"] = labels
         write_csv(self.event_gate, rows)
+        self.refresh_artifact_hashes()
         result = run_extraction(self.turns, self.event_gate, self.episode_gate,
             self.turnover_gate, self.gate_summary, self.output, manual_audit_blocks=0)
         self.assertEqual(result["blocks"]["candidate_blocks_total"], 1)
@@ -131,10 +177,138 @@ class ConfirmedCeoQaExtractionTests(unittest.TestCase):
             rows = list(csv.DictReader(handle))
         rows[0]["matched_shared_speakers"] += "; Other Person, Acme Inc - CEO"
         write_csv(self.event_gate, rows)
+        self.refresh_artifact_hashes()
         with self.assertRaisesRegex(ValueError, "inconsistent CEO anchor"):
             run_extraction(self.turns, self.event_gate, self.episode_gate,
                 self.turnover_gate, self.gate_summary, self.output, manual_audit_blocks=0)
         self.assertFalse(self.output.exists())
+
+    def test_producer_binds_all_inputs_and_outputs(self):
+        summary = json.loads(self.gate_summary.read_text())
+        self.assertEqual(set(summary["provenance"]["input_files"]), set(INPUT_NAMES))
+        for name, record in summary["provenance"]["input_files"].items():
+            self.assertEqual(record["sha256"], sha256_file(getattr(self.producer_args, name)))
+        self.assertEqual(len(summary["artifact_sha256"]), 3)
+
+    def test_rejects_gate_table_byte_substitution(self):
+        for path in (self.event_gate, self.episode_gate, self.turnover_gate):
+            original = path.read_bytes()
+            try:
+                path.write_bytes(original + b"\n")
+                with self.assertRaisesRegex(ValueError, "artifact hash differs"):
+                    run_extraction(self.turns, self.event_gate, self.episode_gate,
+                                   self.turnover_gate, self.gate_summary, self.output, manual_audit_blocks=0)
+                self.assertFalse(self.output.exists())
+            finally:
+                path.write_bytes(original)
+
+    def test_rejects_unbound_historical_bundle(self):
+        summary = json.loads(self.gate_summary.read_text())
+        del summary["bundle_version"]
+        self.gate_summary.write_text(json.dumps(summary))
+        with self.assertRaisesRegex(ValueError, "unbound"):
+            run_extraction(self.turns, self.event_gate, self.episode_gate,
+                           self.turnover_gate, self.gate_summary, self.output, manual_audit_blocks=0)
+        self.assertFalse(self.output.exists())
+
+    def test_rejects_rehashed_external_identity_substitution(self):
+        for path, field in ((self.event_gate, "expected_execid"),
+                            (self.episode_gate, "expected_execid"), (self.turnover_gate, "old_execid")):
+            rows = producer.read_rows(path)
+            rows[0][field] = "99"
+            write_csv(path, rows)
+        self.refresh_artifact_hashes()
+        with self.assertRaisesRegex(ValueError, "expected_execid differs from bound assignment"):
+            run_extraction(self.turns, self.event_gate, self.episode_gate,
+                           self.turnover_gate, self.gate_summary, self.output, manual_audit_blocks=0)
+        self.assertFalse(self.output.exists())
+
+    def test_episode_flags_reconcile_even_with_same_pass_total(self):
+        rows = producer.read_rows(self.episode_gate)
+        rows[0]["episode_analysis_gate_pass"], rows[1]["episode_analysis_gate_pass"] = "0", "1"
+        write_csv(self.episode_gate, rows)
+        self.refresh_artifact_hashes()
+        with self.assertRaisesRegex(ValueError, "episode gate does not reconcile"):
+            run_extraction(self.turns, self.event_gate, self.episode_gate,
+                           self.turnover_gate, self.gate_summary, self.output, manual_audit_blocks=0)
+
+    def test_turnover_flag_cannot_override_failed_episode(self):
+        rows = producer.read_rows(self.turnover_gate)
+        rows[0]["turnover_analysis_gate_pass"] = "1"
+        write_csv(self.turnover_gate, rows)
+        self.refresh_artifact_hashes()
+        summary = json.loads(self.gate_summary.read_text())
+        summary.update(turnover_gate_pass=1, turnover_gate_fail=0)
+        self.gate_summary.write_text(json.dumps(summary))
+        with self.assertRaisesRegex(ValueError, "turnover gate does not reconcile"):
+            run_extraction(self.turns, self.event_gate, self.episode_gate,
+                           self.turnover_gate, self.gate_summary, self.output, manual_audit_blocks=0)
+
+    def test_duplicate_episode_identity_is_rejected(self):
+        rows = producer.read_rows(self.episode_gate)
+        rows[1] = dict(rows[0])
+        write_csv(self.episode_gate, rows)
+        self.refresh_artifact_hashes()
+        with self.assertRaisesRegex(ValueError, "duplicate episode gate identity"):
+            run_extraction(self.turns, self.event_gate, self.episode_gate,
+                           self.turnover_gate, self.gate_summary, self.output, manual_audit_blocks=0)
+
+    def test_external_input_changed_after_gate_creation_is_rejected(self):
+        self.producer_args.execucomp_normalized.write_text("different data\n")
+        with self.assertRaisesRegex(ValueError, "input hash differs: execucomp_normalized"):
+            run_extraction(self.turns, self.event_gate, self.episode_gate,
+                           self.turnover_gate, self.gate_summary, self.output, manual_audit_blocks=0)
+
+    def test_producer_rejects_input_changed_during_scan(self):
+        self.producer_args.output_dir = self.root / "new_gate"
+        original = producer.scan_turns
+        def changing_scan(*args):
+            result = original(*args)
+            with self.producer_args.execucomp_normalized.open("a") as handle:
+                handle.write("\n")
+            return result
+        with patch.object(producer, "scan_turns", side_effect=changing_scan):
+            with self.assertRaisesRegex(ValueError, "input hash differs: execucomp_normalized"):
+                producer.run(self.producer_args)
+        self.assertFalse(self.producer_args.output_dir.exists())
+
+    def test_consumer_rejects_input_changed_during_metadata_read(self):
+        original = consumer.validate_metadata_inputs
+        def changing_read(*args):
+            result = original(*args)
+            with self.producer_args.execucomp_normalized.open("a") as handle:
+                handle.write("\n")
+            return result
+        with patch.object(consumer, "validate_metadata_inputs", side_effect=changing_read):
+            with self.assertRaisesRegex(ValueError, "input hash differs: execucomp_normalized"):
+                run_extraction(self.turns, self.event_gate, self.episode_gate,
+                               self.turnover_gate, self.gate_summary, self.output, manual_audit_blocks=0)
+        self.assertFalse(self.output.exists())
+
+    def test_missing_input_binding_is_not_recognized_as_complete(self):
+        summary = json.loads(self.gate_summary.read_text())
+        del summary["provenance"]["input_files"]["resolution_audit"]
+        self.gate_summary.write_text(json.dumps(summary))
+        with self.assertRaisesRegex(ValueError, "input bindings are missing or incomplete"):
+            run_extraction(self.turns, self.event_gate, self.episode_gate,
+                           self.turnover_gate, self.gate_summary, self.output, manual_audit_blocks=0)
+
+    def test_pass_counts_reconcile_with_actual_episode_flags(self):
+        summary = json.loads(self.gate_summary.read_text())
+        summary.update(episode_gate_pass=2, episode_gate_fail=0)
+        self.gate_summary.write_text(json.dumps(summary))
+        with self.assertRaisesRegex(ValueError, "episode gate pass count differs"):
+            run_extraction(self.turns, self.event_gate, self.episode_gate,
+                           self.turnover_gate, self.gate_summary, self.output, manual_audit_blocks=0)
+
+    def test_relocated_same_bytes_with_relative_input_paths_remain_valid(self):
+        summary = json.loads(self.gate_summary.read_text())
+        for record in summary["provenance"]["input_files"].values():
+            record["path"] = "../" + Path(record["path"]).name
+        self.gate_summary.write_text(json.dumps(summary))
+        result = run_extraction(self.turns, self.event_gate, self.episode_gate,
+                               self.turnover_gate, self.gate_summary, self.output, manual_audit_blocks=0)
+        self.assertEqual(result["blocks"]["candidate_blocks_total"], 1)
 
     def test_old_last_label_gate_is_not_recertified(self) -> None:
         summary = json.loads(self.gate_summary.read_text())

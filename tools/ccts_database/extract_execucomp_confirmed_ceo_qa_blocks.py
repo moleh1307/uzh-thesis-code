@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import json
 import os
 import shutil
@@ -39,10 +38,15 @@ from extract_ccts_ceo_qa_blocks import (
 
 
 from ceo_title_evidence import GATE_VERSION, single_anchor
+from speaker_gate_contract import sha256_file, verify_artifact_bindings, verify_input_bindings
+from build_ccts_execucomp_speaker_gate import (
+    EPISODE_FIELDS, TURNOVER_FIELDS, read_rows, validate_metadata_inputs,
+    build_episode_and_turnover_gates,
+)
 
 EXPECTED_GATE_VERSION = GATE_VERSION
 EXPECTED_EXTERNAL_STATUS = "confirmed_external_ceo_shared_pre_qa"
-SCRIPT_VERSION = "external_execucomp_speaker_gate_anchor_v1_20260928"
+SCRIPT_VERSION = "external_execucomp_bound_speaker_gate_anchor_v2_20261003"
 GATE_FIELDS = [
     "gvkey",
     "expected_execid",
@@ -107,14 +111,6 @@ def episode_key(row: Mapping[str, str]) -> tuple[str, str, str]:
     return row["gvkey"].strip(), str(int(row["expected_execid"])), row["tenure_episode"].strip()
 
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def read_csv_rows(path: Path) -> list[dict[str, str]]:
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         return list(csv.DictReader(handle))
@@ -127,6 +123,7 @@ def load_speaker_gate(
     gate_summary_path: Path,
     turns_path: Path,
 ) -> tuple[dict[str, dict[str, str]], list[dict[str, str]], list[dict[str, str]], dict[str, Any], str]:
+    summary_sha256 = sha256_file(gate_summary_path)
     with gate_summary_path.open("r", encoding="utf-8") as handle:
         gate_summary = json.load(handle)
     if gate_summary.get("status") != "complete":
@@ -140,6 +137,25 @@ def load_speaker_gate(
     expected_sha256 = gate_summary.get("provenance", {}).get("turns_sha256_verified")
     if not expected_sha256 or turns_sha256 != expected_sha256:
         raise ValueError("analysis turn CSV hash does not match the verified speaker-gate input")
+    artifact_paths = {
+        "event_speaker_gate_csv": event_gate_path,
+        "episode_speaker_gate_csv": episode_gate_path,
+        "turnover_speaker_gate_csv": turnover_gate_path,
+    }
+    verify_artifact_bindings(gate_summary, artifact_paths)
+    inputs = verify_input_bindings(
+        gate_summary.get("provenance", {}).get("input_files"),
+        base_dir=gate_summary_path.parent, turns_path=turns_path, turns_sha256=turns_sha256,
+    )
+    assignments = read_rows(inputs["event_assignments"])
+    source_episodes = read_rows(inputs["episode_manifest"])
+    source_map = read_rows(inputs["turnover_episode_map"])
+    source_pairs = read_rows(inputs["turnover_pairs"])
+    context = validate_metadata_inputs(
+        assignments, source_episodes, source_map, source_pairs,
+        read_rows(inputs["execucomp_normalized"]), read_rows(inputs["call_sequences"]),
+        inputs["fetch_audit"], inputs["dedup_summary"], inputs["resolution_audit"],
+    )
 
     gate_rows: dict[str, dict[str, str]] = {}
     required = {
@@ -192,6 +208,22 @@ def load_speaker_gate(
     actual_passes = sum(row["_gate_pass"] == "1" for row in gate_rows.values())
     if actual_passes != expected_passes:
         raise ValueError(f"event gate pass rows={actual_passes}; summary says {expected_passes}")
+    if (context["dedup_summary"].get("output_sha256") != turns_sha256
+            or int(context["dedup_summary"]["output_rows"]) != int(gate_summary.get("turn_rows_scanned", -1))
+            or sum(int(row["_turn_rows"]) for row in gate_rows.values()) != int(context["dedup_summary"]["output_rows"])):
+        raise ValueError("speaker gate turn hash/count differs from bound deduplication evidence")
+    if set(gate_rows) != set(context["assignment_by_event"]):
+        raise ValueError("event gate identities differ from bound assignments")
+    for event_id, row in gate_rows.items():
+        source = context["assignment_by_event"][event_id]
+        for target, field in (("gvkey", "gvkey"), ("expected_execid", "execid"),
+                              ("tenure_episode", "tenure_episode"), ("event_date", "event_date"),
+                              ("calendar_quarter", "calendar_quarter"), ("turnover_ids", "turnover_ids")):
+            if row[target] != source[field]:
+                raise ValueError(f"event gate {target} differs from bound assignment: {event_id}")
+        key = (source["gvkey"].strip(), str(int(source["execid"])), source["tenure_episode"].strip())
+        if row["expected_ceo_name"] != context["normalized_by_episode"][key]:
+            raise ValueError(f"event gate CEO name differs from bound ExecuComp episode: {event_id}")
 
     episodes = read_csv_rows(episode_gate_path)
     turnovers = read_csv_rows(turnover_gate_path)
@@ -199,6 +231,42 @@ def load_speaker_gate(
         raise ValueError("episode gate row count does not match summary")
     if len(turnovers) != int(gate_summary.get("turnover_gate_pass", -1)) + int(gate_summary.get("turnover_gate_fail", -1)):
         raise ValueError("turnover gate row count does not match summary")
+    min_calls = int(gate_summary.get("minimum_confirmed_calls", 0))
+    min_quarters = int(gate_summary.get("minimum_confirmed_quarters", 0))
+    if min_calls < 1 or min_quarters < 1:
+        raise ValueError("speaker gate thresholds must be positive")
+    numeric_events = [{**row, **{field: int(row[field]) for field in (
+        "event_speaker_gate_pass", "pre_turn_rows", "qa_turn_rows")}}
+        for row in gate_rows.values()]
+    expected_episodes, expected_turnovers = build_episode_and_turnover_gates(
+        numeric_events, source_episodes, source_map, source_pairs, min_calls, min_quarters,
+    )
+    for name, rows, expected_rows, fields, key_function, flag in (
+        ("episode", episodes, expected_episodes, EPISODE_FIELDS, episode_key, "episode_analysis_gate_pass"),
+        ("turnover", turnovers, expected_turnovers, TURNOVER_FIELDS,
+         lambda row: row["turnover_id"], "turnover_analysis_gate_pass"),
+    ):
+        actual = {}
+        for row in rows:
+            key = key_function(row)
+            if key in actual:
+                raise ValueError(f"duplicate {name} gate identity: {key}")
+            actual[key] = row
+        expected = {key_function(row): row for row in expected_rows}
+        if set(actual) != set(expected):
+            raise ValueError(f"{name} gate identities differ from bound source")
+        for key, row in actual.items():
+            if any(str(row.get(field, "")) != str(expected[key][field]) for field in fields):
+                raise ValueError(f"{name} gate does not reconcile with events and bound source: {key}")
+        passes = sum(int(row[flag]) for row in rows)
+        if passes != int(gate_summary[f"{name}_gate_pass"]):
+            raise ValueError(f"{name} gate pass count differs from summary")
+    # Reject inputs replaced during parsing, before any extraction output exists.
+    verify_artifact_bindings(gate_summary, artifact_paths)
+    verify_input_bindings(gate_summary["provenance"]["input_files"],
+                          base_dir=gate_summary_path.parent, turns_path=turns_path)
+    if sha256_file(gate_summary_path) != summary_sha256:
+        raise ValueError("speaker gate summary changed during verification")
     return gate_rows, episodes, turnovers, gate_summary, turns_sha256
 
 
@@ -664,6 +732,7 @@ def run_extraction(
                 "turnover_gate_csv": str(turnover_gate_path.resolve()),
                 "gate_summary_json": str(gate_summary_path.resolve()),
                 "gate_version": gate_version,
+                "gate_bundle_version": gate_summary["bundle_version"],
                 "external_identity_rule": "only event_speaker_gate_pass=1 and exactly one shared CCTS CEO speaker key; extraction is anchored to the gate's matched_shared_speakers label",
             },
             "artifacts": {},
