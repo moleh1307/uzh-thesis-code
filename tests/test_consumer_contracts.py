@@ -22,7 +22,10 @@ class ConsumerContractTests(unittest.TestCase):
         self.output = self.root / "output.jsonl"
         self.run = self.root / "run.json"
         self.units = self.root / "units.csv"
-        self.requests = [{"custom_id": "u1", "response_schema": SCHEMA}]
+        self.requests = [{"custom_id": "u1", "response_schema": SCHEMA,
+            "messages": [{"role": "system", "content": "Synthetic fixture"},
+                         {"role": "user", "content": json.dumps({"unit_type": "pre",
+                          "ceo_presentation_segment": " ".join(["business"] * 100)})}]}]
         self.input.write_text(json.dumps(self.requests[0]) + "\n")
         self.units.write_text("custom_id,unit_type,event_id,start_date,unit_word_count\n"
                               "u1,pre,100,2020-01-01,100\n")

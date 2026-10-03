@@ -25,6 +25,7 @@ from csv_contract import configure_csv
 
 configure_csv()
 from typing import Iterable, Mapping, Sequence
+from annotation_contract import CODING_RULES
 
 
 BLINDED_FIELDS = (
@@ -497,17 +498,7 @@ environment.
 
 ## Coding Rules
 
-1. Choose a content class first.
-   - `substantive`: interpretable CEO business, financial, operational,
-     strategic, governance, management, market, risk, forecast, or commitment content.
-   - `mixed`: substantive CEO content plus a closing, handoff, thanks, or other procedural language.
-   - `procedural_only`: only routing, audio checks, thanks, handoffs, or closings with no substantive CEO content.
-   - `uncertain`: not confidently classifiable from the supplied text.
-2. For `substantive`, `mixed`, or `uncertain`, set a specificity score from 1 to 5.
-3. For `procedural_only`, use **Unscorable**. This records `human_ok=0` and score 0.
-4. For PRE, score the CEO presentation segment. For Q&A, read the analyst question only for context and score the CEO answer.
-5. Score the complete CEO target as supplied. Do not remove closing language from a mixed unit.
-6. Do not use outside knowledge, factual correctness, favorability, or confidence as a substitute for specificity.
+{CODING_RULES}
 
 ## Dashboard Command
 

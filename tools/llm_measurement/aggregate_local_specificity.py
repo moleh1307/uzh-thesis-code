@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from specificity_validation import strict_json, validate_result, verify_provenance, reconcile_attempts
+from annotation_contract import human_reference
 
 import argparse
 import csv
@@ -251,14 +252,16 @@ def weighted_kappa(left: Sequence[int], right: Sequence[int], quadratic: bool) -
 
 
 def agreement_metrics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    comparable_rows = [row for row in rows if row.get("model_scored")]
+    comparable_rows = [row for row in rows if row.get("model_scored") and row.get("human_scored")]
     human = [int(row["human_specificity"]) for row in comparable_rows]
     model = [int(row["model_specificity"]) for row in comparable_rows]
     absolute = [abs(x - y) for x, y in zip(human, model)]
     return {
         "n": len(comparable_rows),
         "n_exact_overlap": len(rows),
-        "n_model_unscored": len(rows) - len(comparable_rows),
+        "n_model_unscored": sum(row.get("human_scored") and not row.get("model_scored") for row in rows),
+        "n_human_source_missing": sum(row.get("reference_state") == "source_uninterpretable" for row in rows),
+        "n_human_procedural": sum(row.get("reference_state") == "procedural_only" for row in rows),
         "human_mean": safe_mean(human),
         "model_mean": safe_mean(model),
         "exact_agreement": sum(value == 0 for value in absolute) / len(absolute) if absolute else None,
@@ -285,6 +288,8 @@ def build_unit_rows(
 ) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for custom_id, source in input_rows.items():
+        if source.get("unit_type") not in {"pre", "qa"} or parse_int(source.get("unit_word_count"), "unit_word_count", custom_id) <= 0:
+            raise ValueError(f"invalid unit type/positive CEO word count: {custom_id}")
         output = output_rows.get(custom_id, {})
         valid, validation_error = validate_result(output or None)
         model_ok = output["parsed"]["ok"] if valid else None
@@ -335,6 +340,11 @@ def build_call_rows(
     result: list[dict[str, Any]] = []
     for event_id in sorted(grouped, key=lambda value: (grouped[value][0]["start_date"], value)):
         units = grouped[event_id]
+        dates = {unit["start_date"] for unit in units}
+        if not event_id or len(dates) != 1 or not units[0]["start_date"]:
+            raise ValueError(f"missing/inconsistent event date: {event_id}")
+        if call_metadata.get(event_id, {}).get("start_date") not in (None, "", units[0]["start_date"]):
+            raise ValueError(f"call manifest date mismatch: {event_id}")
         by_type = {
             unit_type: summarize_units([unit for unit in units if unit["unit_type"] == unit_type])
             for unit_type in ("pre", "qa")
@@ -361,8 +371,8 @@ def build_call_rows(
             "common_50_200_equal_unit_mean",
             "common_50_200_unit_median",
         ):
-            row[f"pre_minus_qa_{measure}"] = difference(
-                row[f"pre_{measure}"], row[f"qa_{measure}"]
+            row[f"qa_minus_pre_{measure}"] = difference(
+                row[f"qa_{measure}"], row[f"pre_{measure}"]
             )
         result.append(row)
     return result
@@ -411,8 +421,8 @@ def build_human_call_rows(
             "common_50_200_equal_unit_mean",
             "common_50_200_unit_median",
         ):
-            row[f"pre_minus_qa_{measure}"] = difference(
-                row[f"pre_{measure}"], row[f"qa_{measure}"]
+            row[f"qa_minus_pre_{measure}"] = difference(
+                row[f"qa_{measure}"], row[f"pre_{measure}"]
             )
         result.append(row)
     return result
@@ -454,15 +464,15 @@ def call_level_comparison(
             "qa_word_weighted_mean",
             "qa_word_weighted_mean",
         ),
-        "PRE-Q&A CEO-word-weighted": (
-            "pre_minus_qa_word_weighted_mean",
-            "pre_minus_qa_word_weighted_mean",
+        "Q&A-PRE CEO-word-weighted": (
+            "qa_minus_pre_word_weighted_mean",
+            "qa_minus_pre_word_weighted_mean",
         ),
         "PRE equal-unit mean": ("pre_equal_unit_mean", "pre_equal_unit_mean"),
         "Q&A equal-unit mean": ("qa_equal_unit_mean", "qa_equal_unit_mean"),
-        "PRE-Q&A equal-unit mean": (
-            "pre_minus_qa_equal_unit_mean",
-            "pre_minus_qa_equal_unit_mean",
+        "Q&A-PRE equal-unit mean": (
+            "qa_minus_pre_equal_unit_mean",
+            "qa_minus_pre_equal_unit_mean",
         ),
     }
     return {
@@ -484,12 +494,14 @@ def build_human_crosswalk(
         if audit_id not in human_coded:
             raise SystemExit(f"human key points to missing audit_id: {audit_id}")
         human_row = human_coded[audit_id]
-        if human_row.get("human_ok") != "1" or not str(human_row.get("human_specificity", "")):
-            raise SystemExit(f"human overlap row is not a valid frozen score: {audit_id}")
         source = model_by_id[custom_id]
-        human_score = parse_int(human_row["human_specificity"], "human_specificity", audit_id)
-        if human_score not in range(1, 6):
-            raise SystemExit(f"human score outside 1-5: {audit_id}")
+        if human_row.get("unit_type") != source["unit_type"]:
+            raise ValueError(f"human/model unit type mismatch: {audit_id}")
+        if key_row.get("event_id") and str(key_row["event_id"]) != str(source["event_id"]):
+            raise ValueError(f"human key event mismatch: {audit_id}")
+        reference = human_reference(human_row)
+        human_score = reference["human_specificity"]
+        comparable = reference["reference_state"] == "scored" and bool(source["scored"])
         model_score = source["model_specificity"] if source["scored"] else ""
         result.append(
             {
@@ -499,14 +511,19 @@ def build_human_crosswalk(
                 "unit_type": source["unit_type"],
                 "event_id": source["event_id"],
                 "unit_word_count": source["unit_word_count"],
-                "human_specificity": human_score,
+                "start_date": source["start_date"],
+                "human_content_class": human_row["human_content_class"],
+                "reference_state": reference["reference_state"],
+                "human_ok": reference["human_ok"],
+                "human_scored": reference["reference_state"] == "scored",
+                "human_specificity": human_score if human_score is not None else "",
                 "model_ok": source["model_ok"],
                 "model_specificity": model_score,
                 "model_scored": bool(source["scored"]),
                 "signed_model_minus_human": (
-                    int(model_score) - human_score if source["scored"] else ""
+                    int(model_score) - human_score if comparable else ""
                 ),
-                "absolute_difference": abs(int(model_score) - human_score) if source["scored"] else "",
+                "absolute_difference": abs(int(model_score) - human_score) if comparable else "",
             }
         )
     return result
@@ -528,23 +545,26 @@ def aggregate_call_metrics(call_rows: Sequence[Mapping[str, Any]]) -> dict[str, 
         "common_50_200_unit_median",
     )
     for measure in measures:
-        pre_values = [float(row[f"pre_{measure}"]) for row in call_rows if row.get(f"pre_{measure}") is not None]
-        qa_values = [float(row[f"qa_{measure}"]) for row in call_rows if row.get(f"qa_{measure}") is not None]
+        paired = [row for row in call_rows if row.get(f"pre_{measure}") is not None and row.get(f"qa_{measure}") is not None]
+        pre_values = [float(row[f"pre_{measure}"]) for row in paired]
+        qa_values = [float(row[f"qa_{measure}"]) for row in paired]
         diff_values = [
-            float(row[f"pre_minus_qa_{measure}"])
-            for row in call_rows
-            if row.get(f"pre_minus_qa_{measure}") is not None
+            float(row[f"qa_minus_pre_{measure}"])
+            for row in paired
         ]
         summary[measure] = {
             "pre_call_mean": safe_mean(pre_values),
             "qa_call_mean": safe_mean(qa_values),
-            "pre_minus_qa_call_mean": safe_mean(diff_values),
+            "qa_minus_pre_call_mean": safe_mean(diff_values),
             "pre_call_median": safe_median(pre_values),
             "qa_call_median": safe_median(qa_values),
-            "pre_minus_qa_call_median": safe_median(diff_values),
+            "qa_minus_pre_call_median": safe_median(diff_values),
             "n_pre": len(pre_values),
             "n_qa": len(qa_values),
             "n_difference": len(diff_values),
+            "paired_event_ids": [str(row["event_id"]) for row in paired],
+            "available_pre_call_mean": safe_mean([row[f"pre_{measure}"] for row in call_rows if row.get(f"pre_{measure}") is not None]),
+            "available_qa_call_mean": safe_mean([row[f"qa_{measure}"] for row in call_rows if row.get(f"qa_{measure}") is not None]),
         }
     return summary
 
@@ -586,8 +606,8 @@ def build_report(
         "# Local Specificity Call-Level Diagnostic",
         "",
         f"- Created UTC: {timestamp}",
-        "- Status: completed diagnostic aggregation",
-        "- Scope: the frozen ten-call turnover-focused anchor; this is not a representative full-universe estimate.",
+        "- Status: inspect technical coverage and validity below before interpreting diagnostics.",
+        "- Scope: supplied verified units; sampled units do not establish complete-call or population estimates.",
         "- Unit scores are preserved separately and `ok=0` units are excluded from score means without imputation.",
         "",
         "## Integrity",
@@ -608,7 +628,7 @@ def build_report(
         "",
         "The primary aggregation is CEO-word-weighted. Equal-unit means, medians, and common 50-200-word support are reported as sensitivities.",
         "",
-        "| Measure | PRE call mean | Q&A call mean | PRE-Q&A mean | N difference |",
+        "| Measure | PRE call mean | Q&A call mean | Q&A-PRE mean | N difference |",
         "|---|---:|---:|---:|---:|",
     ]
     measure_labels = {
@@ -623,7 +643,7 @@ def build_report(
         item = call_summary[measure]
         lines.append(
             f"| {label} | {fmt(item['pre_call_mean'])} | {fmt(item['qa_call_mean'])} | "
-            f"{fmt(item['pre_minus_qa_call_mean'])} | {item['n_difference']} |"
+            f"{fmt(item['qa_minus_pre_call_mean'])} | {item['n_difference']} |"
         )
     lines += [
         "",
@@ -650,7 +670,7 @@ def build_report(
             "",
             f"- Matched calls with human labels: {len(human_call_rows):,}.",
             "- Call-level values use the same CEO-word-weighted and equal-unit aggregation rules separately for each scorer.",
-            "- The two model-unscored PRE units are retained in the human call-level aggregate and excluded from the model aggregate without imputation.",
+            "- Human/model call comparisons use identical commonly scorable units; full-support descriptive aggregates are separate.",
             "",
             "| Measure | N calls | Model mean | Human mean | Model-Human | Mean absolute difference | Pearson |",
             "|---|---:|---:|---:|---:|---:|---:|",
@@ -665,10 +685,10 @@ def build_report(
         "",
         "## Interpretation and Limits",
         "",
-        "- The local run is technically complete and reproducible under its frozen runtime settings; this report does not establish substantive construct validity.",
-        "- The model marked two PRE observations `ok=0`, while the human coder marked both as scoreable. They remain visible in the unit table; the model-unscored rows are excluded from model means without imputation and require unit-gate adjudication.",
-        "- The ten calls were selected as a turnover-focused calibration anchor, so their PRE-Q&A difference is descriptive and must not be generalized to the CCTS universe.",
-        "- The human crosswalk contains exact custom-ID matches from the same 277-unit audit package. Model-unscored rows remain visible and are excluded from agreement metrics without imputation.",
+        "- Technical validity and missingness are reported separately; this report does not establish construct validity.",
+        "- Eligibility disagreements, source missingness and technical failures remain visible; no score is imputed.",
+        "- Supplied call contrasts are descriptive; do not generalize sampled-unit contrasts to complete calls or the CCTS universe.",
+        "- The human crosswalk uses verified exact IDs and current annotation/missingness rules; numerical comparisons use common scored support.",
         "- The next methodological gate is to review this diagnostic against the frozen human lane and decide whether the unit gate or prompt needs a new contract version before a larger local run.",
         "",
         "## Artifacts",
@@ -714,6 +734,12 @@ def main() -> int:
                                        args.input_manifest, requests, output_attempts)
     except (ValueError, OSError) as exc:
         raise SystemExit(f"provenance rejected: {exc}") from exc
+    for request in requests:
+        source = input_rows[request["custom_id"]]
+        target = strict_json(request["messages"][1]["content"])
+        text = target.get("ceo_answer") if target["unit_type"] == "qa" else target.get("ceo_presentation_segment")
+        if source["unit_type"] != target["unit_type"] or int(source["unit_word_count"]) != len(text.split()):
+            raise SystemExit("input metadata type/CEO word count differs from request text")
     coverage = {"missing_output_ids": sorted(set(input_rows) - set(output_rows)),
                 "unexpected_output_ids": sorted(set(output_rows) - set(input_rows))}
 
@@ -734,11 +760,26 @@ def main() -> int:
     human_metrics: dict[str, Any] = {}
     human_call_rows: list[dict[str, Any]] = []
     human_call_comparison: dict[str, Any] = {}
-    if (args.human_coded is None) != (args.human_key is None):
-        raise SystemExit("provide both --human-coded and --human-key, or neither")
-    if args.human_coded and args.human_key:
+    if args.human_key and not args.human_coded:
+        raise SystemExit("--human-key requires --human-coded")
+    human_full_call_rows = []
+    common_model_call_rows = []
+    if args.human_coded:
         human_coded = index_unique(read_csv_rows(args.human_coded), "audit_id", "human coded file")
-        human_key = index_unique(read_csv_rows(args.human_key), "source_custom_id", "human key")
+        if args.human_key:
+            key_rows = read_csv_rows(args.human_key)
+            key_field = "source_custom_id" if key_rows and "source_custom_id" in key_rows[0] else "audit_id"
+            human_key = index_unique(key_rows, key_field, "human key")
+        else:
+            human_key = {key: {"audit_id": key} for key in human_coded}
+        request_by_id = {row["custom_id"]: row for row in requests}
+        for custom_id in set(input_rows) & set(human_key):
+            human = human_coded[human_key[custom_id]["audit_id"]]
+            human_reference(human)
+            target = strict_json(request_by_id[custom_id]["messages"][1]["content"])
+            for field in ("ceo_presentation_segment", "analyst_question", "ceo_answer"):
+                if field in human and field in target and human[field] != target[field]:
+                    raise ValueError(f"human source text mismatch: {custom_id}/{field}")
         human_crosswalk = build_human_crosswalk(unit_rows, human_coded, human_key)
         human_metrics["all exact-overlap units"] = agreement_metrics(human_crosswalk)
         for unit_type in ("pre", "qa"):
@@ -749,8 +790,12 @@ def main() -> int:
             subset = [row for row in human_crosswalk if row["audit_split"] == split]
             if subset:
                 human_metrics[f"{split} exact-overlap units"] = agreement_metrics(subset)
-        human_call_rows = build_human_call_rows(human_crosswalk, call_metadata)
-        human_call_comparison = call_level_comparison(call_rows, human_call_rows)
+        human_full_call_rows = build_human_call_rows(human_crosswalk, call_metadata)
+        common = [row for row in human_crosswalk if row["human_scored"] and row["model_scored"]]
+        common_ids = {row["custom_id"] for row in common}
+        common_model_call_rows = build_call_rows([row for row in unit_rows if row["custom_id"] in common_ids], call_metadata)
+        human_call_rows = build_human_call_rows(common, call_metadata)
+        human_call_comparison = call_level_comparison(common_model_call_rows, human_call_rows)
 
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     unit_fields = [
@@ -771,13 +816,14 @@ def main() -> int:
         "word_weighted_mean", "equal_unit_mean", "unit_median",
         "common_50_200_word_weighted_mean", "common_50_200_equal_unit_mean", "common_50_200_unit_median",
     ):
-        call_fields.append(f"pre_minus_qa_{measure}")
+        call_fields.append(f"qa_minus_pre_{measure}")
     call_fields = list(dict.fromkeys(call_fields))
     write_csv(args.output_dir / "specificity_call_level.csv", call_rows, call_fields)
 
     human_fields = [
         "audit_id", "custom_id", "audit_split", "unit_type", "event_id", "unit_word_count",
         "human_specificity", "model_ok", "model_specificity", "model_scored",
+        "human_scored", "human_ok", "human_content_class", "reference_state",
         "signed_model_minus_human", "absolute_difference",
     ]
     write_csv(args.output_dir / "specificity_human_crosswalk.csv", human_crosswalk, human_fields)
@@ -792,12 +838,15 @@ def main() -> int:
         "word_weighted_mean", "equal_unit_mean", "unit_median",
         "common_50_200_word_weighted_mean", "common_50_200_equal_unit_mean", "common_50_200_unit_median",
     ):
-        human_call_fields.append(f"pre_minus_qa_{measure}")
+        human_call_fields.append(f"qa_minus_pre_{measure}")
     human_call_fields = list(dict.fromkeys(human_call_fields))
     write_csv(args.output_dir / "specificity_human_call_level.csv", human_call_rows, human_call_fields)
+    write_csv(args.output_dir / "specificity_human_full_support_call_level.csv", human_full_call_rows, human_call_fields)
+    write_csv(args.output_dir / "specificity_model_common_support_call_level.csv", common_model_call_rows, call_fields)
 
     input_paths: dict[str, Path] = {
         "input_manifest": args.input_manifest,
+        "input_jsonl": args.input_jsonl,
         "output_jsonl": args.output_jsonl,
         "run_manifest": args.run_manifest,
     }
@@ -814,11 +863,13 @@ def main() -> int:
                    any(r["model_validation_error"] for r in unit_rows) else "completed_diagnostic_aggregation"),
         "provenance": provenance,
         "coverage": coverage,
-        "scope": "ten-call turnover-focused local specificity anchor",
+        "scope": "supplied verified scoring units; complete-call coverage not established",
         "inputs": {key: str(path.resolve()) for key, path in input_paths.items()},
         "input_sha256": {key: sha256_path(path) for key, path in input_paths.items()},
         "script": str(Path(__file__).resolve()),
         "script_sha256": sha256_path(Path(__file__).resolve()),
+        "helper_sha256": {name: sha256_path(Path(__file__).parent / name)
+                          for name in ("annotation_contract.py", "specificity_validation.py")},
         "unit_counts": dict(Counter(row["unit_type"] for row in unit_rows)),
         "model_score_distribution_ok1": {
             str(score): sum(row["scored"] and row["model_specificity"] == score for row in unit_rows)
@@ -833,6 +884,9 @@ def main() -> int:
             "call_level_comparison_attempted": bool(human_call_comparison),
             "matched_call_count": len(human_call_rows),
             "call_level_comparison": human_call_comparison,
+            "common_scored_custom_ids": sorted(row["custom_id"] for row in human_crosswalk if row["human_scored"] and row["model_scored"]),
+            "eligibility_comparable": sum(row["human_ok"] is not None and row["model_ok"] != "" for row in human_crosswalk),
+            "eligibility_disagreements": [row["custom_id"] for row in human_crosswalk if row["human_ok"] is not None and row["model_ok"] != "" and row["human_ok"] != row["model_ok"]],
         },
         "aggregation_contract": {
             "primary": "CEO-word-weighted mean of scored units within each call and segment",
@@ -842,6 +896,9 @@ def main() -> int:
                 "common 50-200 word support",
             ],
             "missing_score_rule": "ok=0, invalid, or error units are retained but excluded; no imputation",
+            "contrast": "Q&A minus PRE",
+            "across_calls": "equal-call descriptive means on measure-specific paired event support",
+            "human_model_comparison": "identical commonly scored custom IDs; full-support descriptions separate",
             "common_support_words": [COMMON_MIN_WORDS, COMMON_MAX_WORDS],
         },
         "artifacts": {
@@ -849,7 +906,13 @@ def main() -> int:
             "call_level_csv": str((args.output_dir / "specificity_call_level.csv").resolve()),
             "human_crosswalk_csv": str((args.output_dir / "specificity_human_crosswalk.csv").resolve()),
             "human_call_level_csv": str((args.output_dir / "specificity_human_call_level.csv").resolve()),
+            "human_full_support_call_level_csv": str((args.output_dir / "specificity_human_full_support_call_level.csv").resolve()),
+            "model_common_support_call_level_csv": str((args.output_dir / "specificity_model_common_support_call_level.csv").resolve()),
         },
+        "output_sha256": {name: sha256_path(args.output_dir / name) for name in (
+            "specificity_unit_results.csv", "specificity_call_level.csv", "specificity_human_crosswalk.csv",
+            "specificity_human_call_level.csv", "specificity_human_full_support_call_level.csv",
+            "specificity_model_common_support_call_level.csv")},
     }
     summary_path = args.output_dir / "specificity_call_level_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2, allow_nan=False) + "\n", encoding="utf-8")

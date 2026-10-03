@@ -1,0 +1,2 @@
+# Length diagnostics run in a separate Python >=3.10 analysis environment.
+numpy==2.2.6

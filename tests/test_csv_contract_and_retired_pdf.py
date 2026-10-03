@@ -26,7 +26,7 @@ class CsvContractTests(unittest.TestCase):
                         and isinstance(node.value.func, ast.Name) and node.value.func.id == "configure_csv"
                         for node in tree.body))
                 count += 1
-        self.assertEqual(count, 24)
+        self.assertEqual(count, 25)
 
     def test_standalone_readers_accept_long_fields_without_fetcher_import(self):
         cases = [("ccts_database/build_ccts_execucomp_speaker_gate.py", "read_rows"),

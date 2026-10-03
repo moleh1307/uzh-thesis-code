@@ -50,13 +50,15 @@ All entries below are in `tools/llm_measurement/`.
 | --- | --- |
 | `build_specificity_scoring_manifest.py` | PRE/Q&A scoring units and imported splitting helper |
 | `build_untouched_preqa_evaluation_manifest.py` | Deterministic source-clean evaluation selection |
-| `prepare_fresh_evaluation_human_package.py` | Blinded package creation; historical instructions need review |
+| `prepare_fresh_evaluation_human_package.py` | Blinded package with current content-class/missingness instructions |
 | `freeze_fresh_specificity_setup.py` | Protocol-specific prompt/settings/input archive |
 | `freeze_fresh_specificity_reference.py` | Protocol-specific label and missingness freeze |
+| `prepare_scoring_unit_metadata.py` | Label-free metadata derived from exact frozen request/source hashes |
 | `run_local_specificity.py` | Reviewed offline identity, full-output checks and explicit bounded technical retry |
+| `launch_local_specificity.py` | Explicit detached validation, capture or approved scoring stage |
 | `audit_local_specificity_run.py` | Whole-raw/token/schema/provenance and repeat diagnostics |
-| `aggregate_local_specificity.py` | Historical word-weighted aggregation; sign/support adaptation pending |
-| `analyze_specificity_length_robustness.py` | Length sensitivity; current support and NumPy environment check pending |
+| `aggregate_local_specificity.py` | Q&A-minus-PRE with CEO-word weighting and common reference/model support |
+| `analyze_specificity_length_robustness.py` | Current-schema descriptive length sensitivity and exclusion ledgers |
 
 `human_audit_dashboard/` contains the existing local interface source. It is
 not started during repository preparation, and there is no request to score
@@ -82,8 +84,11 @@ deployment artifacts. Settings use generic local paths and disclose inherited
 generation behavior. No actual request JSONL or reference ratings are copied.
 See [execution validation](execution-validation.md) for the new required profile,
 settings and unit-metadata flags. Aggregation now also requires `--input-jsonl`.
-Do not reuse old unbound outputs or change scientific sign/support definitions
-merely to make the repaired consumer accept a file.
+Do not reuse old unbound outputs. The current consumer explicitly changes historical
+PRE-minus-Q&A output fields to `qa_minus_pre_*`; it does not rewrite old results.
+See [analysis contract](analysis-contract.md) for support definitions and commands.
+Length analysis requires the pinned `requirements-analysis.txt` in Python >=3.10;
+keep that environment separate from the reviewed Python 3.9 GPU runtime.
 
 ## Verified Scope
 

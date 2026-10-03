@@ -2,7 +2,8 @@
 
 Repairs #2, #3, #7 and #4 are software checks, not approval to run the model or scale
 the research. Prompt, two-field schema and decoding values are unchanged.
-Other open pipeline issues still prevent full protocol-readiness claims.
+All sixteen tracked findings are closed; scientific validation and execution
+approval remain separate from software readiness.
 
 ## Reviewed Local Identity
 
@@ -38,7 +39,7 @@ explicitly authorized detached compute session. Its status is
 `candidate_requires_review`, which scoring rejects. Review checkpoint provenance
 against the intended pinned revision, runtime, template/config and actual device
 placement before creating a separate approved copy; do not merely relabel it to
-bypass discrepancies. No capture or real profile approval occurred in this repair.
+bypass discrepancies. Capture alone never approves a scoring run.
 
 For scoring, use explicit paths:
 
@@ -95,8 +96,9 @@ Audit and aggregation share `specificity_validation.py`. They verify exact
 request/output/unit-metadata file hashes, response-schema hashes, the contract,
 manifest binding checksum and every row's run binding. Repeat auditing requires
 `--repeat-run-manifest` as well as repeat output, with matching execution binding.
-Aggregation additionally requires `--input-jsonl`; no analysis sign, weighting
-or support definition changed in these repairs.
+Aggregation additionally requires `--input-jsonl`. The subsequent analysis-readiness
+repair applies Q&A-minus-PRE and common-support comparisons; see
+[analysis contract](analysis-contract.md). Historical PRE-minus-Q&A files remain historical.
 
 Row failures/missingness remain in diagnostic ledgers and cannot contribute
 scores. Valid `ok=0,specificity=0` remains an abstention. Provenance mismatch
@@ -106,6 +108,29 @@ unbound provenance need a separately authorized migration decision; they are
 not implicitly upgraded. Issue #7's reference to three fields was inaccurate:
 the actual schema in this checkout is exactly `ok` and `specificity`.
 
-All regression evidence for these repairs is synthetic and offline. No actual
-transcript, label, frozen research artifact, model setting or remote deployment
-was changed.
+Regression tests are synthetic and offline. Operational preflight receipts belong
+in the private research archive, not this public repository. A remote deployment
+does not imply model execution or measurement-quality validation.
+
+## Detached Stage Launcher
+
+`launch_local_specificity.py` takes an explicit JSON config with absolute paths
+for `python`, `runner`, `input_jsonl`, `unit_manifest_csv`, `model`, `settings`,
+plus `revision` and `contract_version`. Scoring additionally needs
+`execution_profile`. Use `--dry-run` to inspect the exact command before launch.
+
+```bash
+python3 tools/llm_measurement/launch_local_specificity.py \
+  --config /path/to/job-config.json --stage validate \
+  --job-dir /path/to/new-job-directory --session uzh-specificity-validation
+```
+
+Every stage uses a fresh job directory and unique named `screen`. It binds input
+and runner/helper hashes, writes `execution.json`, `execution.log` and atomic
+`status.json`, and returns immediately after requesting launch. Inspect status
+and logs separately; do not wait in an SSH session. `--stage capture` loads/hashes
+the model without generating responses and ends at `candidate_requires_review`.
+`--stage score --confirm-scoring` is the only scoring stage and requires a
+separately reviewed approved profile. There is no automatic next stage, retry,
+resume, model download or overwrite. Interruption cleanup terminates only the
+worker's own child process; external SIGKILL cannot guarantee cleanup.
