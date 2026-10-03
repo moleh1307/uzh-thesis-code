@@ -7,7 +7,9 @@ presentations (PRE) versus analyst Q&A, with externally anchored CEO changes.
 
 Prepared on 2026-10-03 from the existing research scripts. This is a migration
 baseline, not a completed analysis or a production scoring release. No model
-was run during preparation. The scoring runner has known execution issues;
+was run during preparation or targeted repairs. Issues #5, #1 and #6 now have
+synthetic regression coverage for annotation persistence and failure reporting;
+the scoring runner still has known execution issues;
 see [known issues](docs/known-issues.md) before running it.
 
 ## Included
