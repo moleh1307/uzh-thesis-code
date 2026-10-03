@@ -20,6 +20,8 @@ configure_csv()
 from statistics import mean, median
 
 import numpy as np
+from annotation_contract import human_reference
+from aggregate_local_specificity import index_unique
 
 
 def sha256(path: Path) -> str:
@@ -83,11 +85,13 @@ def bootstrap_mean_ci(values: list[float], rng: random.Random, draws: int) -> tu
 def independent_bootstrap_diff_ci(
     pre_scores: list[float], qa_scores: list[float], rng: random.Random, draws: int
 ) -> tuple[float, float]:
+    if not pre_scores or not qa_scores:
+        return float("nan"), float("nan")
     estimates = []
     for _ in range(draws):
         pre_mean = mean(rng.choice(pre_scores) for _ in pre_scores)
         qa_mean = mean(rng.choice(qa_scores) for _ in qa_scores)
-        estimates.append(pre_mean - qa_mean)
+        estimates.append(qa_mean - pre_mean)
     estimates.sort()
     return estimates[int(0.025 * draws)], estimates[min(draws - 1, int(0.975 * draws))]
 
@@ -158,7 +162,7 @@ def match_by_period(rows: list[dict], caliper: int) -> list[dict]:
                     "absolute_word_difference": abs(pre_row["word_count"] - qa_row["word_count"]),
                     "pre_score": pre_row["score"],
                     "qa_score": qa_row["score"],
-                    "pre_minus_qa_score": pre_row["score"] - qa_row["score"],
+                    "qa_minus_pre_score": qa_row["score"] - pre_row["score"],
                 }
             )
     return output
@@ -181,6 +185,8 @@ def normal_p_value(z_value: float) -> float:
 
 
 def regression(rows: list[dict], include_interactions: bool = False) -> dict:
+    if not rows or {row["unit_type"] for row in rows} != {"pre", "qa"}:
+        return {"status": "insufficient_support", "reason": "both sections required"}
     periods = sorted({row["period_bin"] for row in rows})
     reference_period = periods[0]
     log_words = np.log(np.asarray([row["word_count"] for row in rows], dtype=float))
@@ -197,6 +203,11 @@ def regression(rows: list[dict], include_interactions: bool = False) -> dict:
         names.append(f"period_{period}")
     x = np.column_stack(columns)
     y = np.asarray([row["score"] for row in rows], dtype=float)
+    if len(rows) <= x.shape[1] or np.linalg.matrix_rank(x) < x.shape[1] or np.std(y) == 0:
+        return {"status": "insufficient_support", "reason": "rank, residual degrees of freedom or score variation"}
+    leverage = np.sum((x @ np.linalg.pinv(x.T @ x)) * x, axis=1)
+    if np.any(leverage >= 1 - 1e-8):
+        return {"status": "insufficient_support", "reason": "unit leverage makes HC3 undefined"}
     beta, covariance, r2 = hc3_ols(x, y)
     estimates = []
     for index, name in enumerate(names):
@@ -213,6 +224,7 @@ def regression(rows: list[dict], include_interactions: bool = False) -> dict:
             }
         )
     return {
+        "status": "estimated_diagnostic",
         "n": len(rows),
         "reference_period": reference_period,
         "word_reference": 140,
@@ -226,6 +238,8 @@ def regression(rows: list[dict], include_interactions: bool = False) -> dict:
 
 
 def qa_minus_pre_contrast(model: dict, words: int) -> dict:
+    if model.get("status") == "insufficient_support":
+        return {"status": "insufficient_support", "word_count": words, "estimate": None}
     names = model["coefficient_names"]
     vector = np.zeros(len(names))
     vector[names.index("qa_indicator")] = 1.0
@@ -247,226 +261,179 @@ def qa_minus_pre_contrast(model: dict, words: int) -> dict:
     }
 
 
-def parse_args() -> argparse.Namespace:
+def load_diagnostic_rows(args):
+    keys_raw = read_csv(args.key_csv)
+    key_field = "custom_id" if keys_raw and "custom_id" in keys_raw[0] else "audit_id"
+    keys = index_unique(keys_raw, key_field, "length metadata")
+    if args.lane == "human_reference":
+        if not args.coded_csv or args.unit_results_csv:
+            raise ValueError("human_reference requires --coded-csv, not --unit-results-csv")
+        raw = read_csv(args.coded_csv)
+        id_field = "audit_id"
+    else:
+        if not args.unit_results_csv or not args.aggregation_summary or args.coded_csv:
+            raise ValueError("model requires --unit-results-csv and --aggregation-summary")
+        summary = json.loads(args.aggregation_summary.read_text())
+        if summary.get("status") != "completed_diagnostic_aggregation":
+            raise ValueError("model length diagnostics require technically valid aggregation")
+        if summary.get("output_sha256", {}).get("specificity_unit_results.csv") != sha256(args.unit_results_csv):
+            raise ValueError("unit results are not bound to the aggregation receipt")
+        raw = read_csv(args.unit_results_csv)
+        id_field = "custom_id"
+    indexed = index_unique(raw, id_field, "length observations")
+    if not indexed or set(indexed) != set(keys):
+        raise ValueError("observation/metadata identity coverage mismatch")
+    rows, exclusions = [], []
+    for unit_id, row in indexed.items():
+        key = keys[unit_id]
+        kind = row.get("unit_type")
+        if kind not in {"pre", "qa"} or key.get("unit_type") != kind or not key.get("period_bin"):
+            raise ValueError(f"invalid section/period metadata: {unit_id}")
+        if args.lane == "human_reference":
+            reference = human_reference(row)
+            state = reference["reference_state"]
+            score = reference["human_specificity"]
+            words = word_count(row)
+        else:
+            for field in ("event_id", "start_date"):
+                if key.get(field) and row.get(field) != key[field]:
+                    raise ValueError(f"model/metadata {field} mismatch: {unit_id}")
+            if row.get("status") != "completed" or row.get("model_validation_error"):
+                raise ValueError(f"technical failure in model unit ledger: {unit_id}")
+            ok, value = row.get("model_ok"), row.get("model_specificity")
+            if (ok, value) not in ({("0", "0")} | {("1", str(i)) for i in range(1, 6)}):
+                raise ValueError(f"invalid current model score schema: {unit_id}")
+            if row.get("scored") != ("True" if ok == "1" else "False"):
+                raise ValueError(f"inconsistent scored flag: {unit_id}")
+            state = "scored" if ok == "1" else "model_unscorable"
+            score = int(value) if ok == "1" else None
+            words = int(row["unit_word_count"])
+        expected_words = key.get("unit_word_count", key.get("target_word_count", ""))
+        if expected_words == "" or int(expected_words) != words:
+            raise ValueError(f"word-count metadata mismatch: {unit_id}")
+        if state != "scored":
+            exclusions.append({"audit_id": unit_id, "unit_type": kind, "reference_state": state})
+            continue
+        if words <= 0:
+            raise ValueError(f"scored target has no words: {unit_id}")
+        rows.append({"audit_id": unit_id, "unit_type": kind, "period_bin": key["period_bin"],
+                     "word_count": words, "score": score, "common_50_200": int(50 <= words <= 200)})
+    return rows, exclusions
+
+
+def json_safe(value):
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {key: json_safe(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [json_safe(item) for item in value]
+    return value
+
+
+def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--coded-csv", type=Path, required=True)
+    parser.add_argument("--coded-csv", type=Path)
+    parser.add_argument("--unit-results-csv", type=Path)
+    parser.add_argument("--aggregation-summary", type=Path)
     parser.add_argument("--key-csv", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--primary-caliper", type=int, default=15)
     parser.add_argument("--bootstrap-draws", type=int, default=10000)
     parser.add_argument("--seed", type=int, default=20260720)
-    parser.add_argument("--lane", choices=("codex_proxy", "human_initial"), default="codex_proxy")
+    parser.add_argument("--lane", choices=("human_reference", "model"), default="human_reference")
     parser.add_argument("--force", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.primary_caliper < 0 or args.bootstrap_draws < 1:
+        parser.error("caliper must be nonnegative and bootstrap draws positive")
+    return args
 
 
-def main() -> int:
+def main():
     args = parse_args()
+    rows, excluded = load_diagnostic_rows(args)
     if args.output_dir.exists() and any(args.output_dir.iterdir()) and not args.force:
-        raise SystemExit(f"output directory is not empty: {args.output_dir}; use --force")
+        raise ValueError("output directory is not empty; use a fresh directory")
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    coded = read_csv(args.coded_csv)
-    keys = {row["audit_id"]: row for row in read_csv(args.key_csv)}
-    if len(coded) != 300 or set(keys) != {row["audit_id"] for row in coded}:
-        raise ValueError("expected a reconciled 300-unit coded/key sample")
-    if any(row["human_ok"] != "1" or row["human_specificity"] not in {"1", "2", "3", "4", "5"} for row in coded):
-        raise ValueError("all 300 units must be scorable before this diagnostic")
-
-    if args.lane == "human_initial":
-        status = "initial_human_length_diagnostic_recode_pending"
-        lane_label = "frozen initial human coding; delayed 60-unit recode pending"
-        lane_caveat = "These are the thesis author's initial blinded human scores; intra-rater reliability remains pending."
-        closeout = (
-            "Do not interpret these initial-human estimates as thesis findings. Reassess after the delayed "
-            "human recode and production-model scoring."
-        )
-    else:
-        status = "local_codex_reviewer_length_diagnostic_not_human_validation"
-        lane_label = "local Codex-assisted reviewer diagnostic, not human validation"
-        lane_caveat = "These are Codex-assisted reviewer scores, not independent human gold labels."
-        closeout = (
-            "Do not interpret these reviewer-only estimates as thesis findings. Repeat the same diagnostics "
-            "after independent human coding and model scoring."
-        )
-
-    rows = []
-    for row in coded:
-        key = keys[row["audit_id"]]
-        rows.append(
-            {
-                "audit_id": row["audit_id"],
-                "unit_type": row["unit_type"],
-                "period_bin": key["period_bin"],
-                "word_count": word_count(row),
-                "score": int(row["human_specificity"]),
-                "common_50_200": int(50 <= word_count(row) <= 200),
-            }
-        )
-
-    diagnostics_path = args.output_dir / "specificity_length_unit_diagnostics.csv"
-    write_csv(diagnostics_path, rows, list(rows[0]))
+    unit_fields = ["audit_id", "unit_type", "period_bin", "word_count", "score", "common_50_200"]
+    write_csv(args.output_dir / "specificity_length_unit_diagnostics.csv", rows, unit_fields)
+    write_csv(args.output_dir / "specificity_length_exclusions.csv", excluded,
+              ["audit_id", "unit_type", "reference_state"])
     rng = random.Random(args.seed)
     pre = [row for row in rows if row["unit_type"] == "pre"]
     qa = [row for row in rows if row["unit_type"] == "qa"]
     pre_common = [row for row in pre if row["common_50_200"]]
     qa_common = [row for row in qa if row["common_50_200"]]
-    common_diff = mean(row["score"] for row in pre_common) - mean(row["score"] for row in qa_common)
-    common_ci = independent_bootstrap_diff_ci(
-        [row["score"] for row in pre_common],
-        [row["score"] for row in qa_common],
-        rng,
-        args.bootstrap_draws,
-    )
-
-    matching = {}
-    primary_pairs = []
-    for caliper in (10, args.primary_caliper, 20, 25):
+    avg = lambda subset, field: mean(row[field] for row in subset) if subset else None
+    common_diff = (avg(qa_common, "score") - avg(pre_common, "score")
+                   if pre_common and qa_common else None)
+    common_ci = independent_bootstrap_diff_ci([row["score"] for row in pre_common],
+                                             [row["score"] for row in qa_common], rng, args.bootstrap_draws)
+    matching, primary_pairs = {}, []
+    for caliper in dict.fromkeys((10, args.primary_caliper, 20, 25)):
         pairs = match_by_period(rows, caliper)
-        differences = [row["pre_minus_qa_score"] for row in pairs]
-        ci = bootstrap_mean_ci(differences, rng, args.bootstrap_draws)
+        differences = [row["qa_minus_pre_score"] for row in pairs]
         matching[str(caliper)] = {
-            "pairs": len(pairs),
-            "mean_absolute_word_difference": mean(row["absolute_word_difference"] for row in pairs),
-            "maximum_absolute_word_difference": max(row["absolute_word_difference"] for row in pairs),
-            "pre_mean": mean(row["pre_score"] for row in pairs),
-            "qa_mean": mean(row["qa_score"] for row in pairs),
-            "mean_paired_pre_minus_qa": mean(differences),
-            "bootstrap_ci95": list(ci),
-        }
+            "pairs": len(pairs), "mean_absolute_word_difference": avg(pairs, "absolute_word_difference"),
+            "maximum_absolute_word_difference": max((row["absolute_word_difference"] for row in pairs), default=None),
+            "pre_mean": avg(pairs, "pre_score"), "qa_mean": avg(pairs, "qa_score"),
+            "mean_paired_qa_minus_pre": mean(differences) if differences else None,
+            "bootstrap_ci95": bootstrap_mean_ci(differences, rng, args.bootstrap_draws)}
         if caliper == args.primary_caliper:
             primary_pairs = pairs
-
-    pairs_path = args.output_dir / "specificity_length_matched_pairs.csv"
-    write_csv(pairs_path, primary_pairs, list(primary_pairs[0]))
-    additive_model = regression(rows)
-    interaction_model = regression(rows, include_interactions=True)
-    additive_contrast = qa_minus_pre_contrast(additive_model, 140)
-    interaction_contrasts = [qa_minus_pre_contrast(interaction_model, words) for words in (100, 140, 180)]
+    write_csv(args.output_dir / "specificity_length_matched_pairs.csv", primary_pairs,
+        ["pair_id", "period_bin", "pre_audit_id", "qa_audit_id", "pre_words", "qa_words",
+         "absolute_word_difference", "pre_score", "qa_score", "qa_minus_pre_score"])
+    additive, interaction = regression(rows), regression(rows, include_interactions=True)
     correlations = {}
     for label, subset in (("all", rows), ("pre", pre), ("qa", qa)):
-        scores = [row["score"] for row in subset]
-        words = [row["word_count"] for row in subset]
-        correlations[label] = {
-            "pearson": pearson(scores, words),
-            "spearman": pearson(average_ranks(scores), average_ranks(words)),
-        }
-
-    summary = {
-        "created_at_utc": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
-        "status": status,
-        "lane": args.lane,
-        "counts": {
-            "units": len(rows),
-            "pre": len(pre),
-            "qa": len(qa),
-            "pre_common_50_200": len(pre_common),
-            "qa_common_50_200": len(qa_common),
-        },
+        scores, words = [row["score"] for row in subset], [row["word_count"] for row in subset]
+        correlations[label] = {"pearson": pearson(scores, words),
+                               "spearman": pearson(average_ranks(scores), average_ranks(words))}
+    inputs = {"key_csv": args.key_csv}
+    for key in ("coded_csv", "unit_results_csv", "aggregation_summary"):
+        if getattr(args, key):
+            inputs[key] = getattr(args, key)
+    summary = json_safe({
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "status": "completed_descriptive_length_diagnostic" if pre and qa else "insufficient_section_support",
+        "lane": args.lane, "contrast": "Q&A minus PRE",
+        "counts": {"units": len(rows), "excluded": len(excluded), "pre": len(pre), "qa": len(qa),
+                   "pre_common_50_200": len(pre_common), "qa_common_50_200": len(qa_common)},
         "score_distribution": dict(sorted(Counter(row["score"] for row in rows).items())),
         "correlations": correlations,
-        "common_support": {
-            "pre_mean": mean(row["score"] for row in pre_common),
-            "qa_mean": mean(row["score"] for row in qa_common),
-            "pre_minus_qa": common_diff,
-            "independent_bootstrap_ci95": list(common_ci),
-        },
+        "common_support": {"pre_mean": avg(pre_common, "score"), "qa_mean": avg(qa_common, "score"),
+                           "qa_minus_pre": common_diff, "independent_unit_bootstrap_ci95": common_ci},
         "period_and_length_matching": matching,
-        "hc3_ols_additive": additive_model,
-        "adjusted_qa_minus_pre_additive_at_140_words": additive_contrast,
-        "hc3_ols_with_qa_length_interactions": interaction_model,
-        "adjusted_qa_minus_pre_interaction_model": interaction_contrasts,
-        "provenance": {
-            "script": str(Path(__file__).resolve()),
-            "coded_csv": str(args.coded_csv.resolve()),
-            "coded_csv_sha256": sha256(args.coded_csv),
-            "key_csv": str(args.key_csv.resolve()),
-            "key_csv_sha256": sha256(args.key_csv),
-            "seed": args.seed,
-            "bootstrap_draws": args.bootstrap_draws,
-            "primary_caliper_words": args.primary_caliper,
-            "numpy_version": np.__version__,
-        },
-        "caveats": [
-            lane_caveat,
-            "Length matching and regression reduce observed length imbalance but cannot distinguish reviewer bias from genuine differences in available concrete detail.",
-            "The 1-5 score is ordinal; OLS is a transparent quasi-cardinal diagnostic, not the primary thesis estimator.",
-            "No transcript text or score was sent to an API or cloud service.",
-        ],
-    }
-    summary_path = args.output_dir / "specificity_length_robustness_summary.json"
-    summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
-
-    primary = matching[str(args.primary_caliper)]
-    report = f"""# Specificity Length-Robustness Diagnostic
-
-## Status
-
-- Lane: {lane_label}
-- Units: {len(rows)} ({len(pre)} PRE, {len(qa)} Q&A)
-- Cloud/API submission: none
-- Primary length-matching caliper: {args.primary_caliper} words, exact calendar-period bin
-
-## Raw Length Signal
-
-| Segment | Pearson(score, words) | Spearman(score, words) |
-| --- | ---: | ---: |
-| PRE | {correlations['pre']['pearson']:.4f} | {correlations['pre']['spearman']:.4f} |
-| Q&A | {correlations['qa']['pearson']:.4f} | {correlations['qa']['spearman']:.4f} |
-
-The Q&A score-length relationship remains material. It may combine a real opportunity-for-detail mechanism with reviewer sensitivity to length.
-
-## Common 50-200 Word Support
-
-- PRE: N={len(pre_common)}, mean={mean(row['score'] for row in pre_common):.4f}
-- Q&A: N={len(qa_common)}, mean={mean(row['score'] for row in qa_common):.4f}
-- PRE minus Q&A: {common_diff:.4f}, independent bootstrap 95% CI [{common_ci[0]:.4f}, {common_ci[1]:.4f}]
-
-## Period And Length Matching
-
-Primary matching yields {primary['pairs']} disjoint PRE/Q&A pairs. Mean absolute word difference is {primary['mean_absolute_word_difference']:.2f}; maximum is {primary['maximum_absolute_word_difference']}.
-
-- Matched PRE mean: {primary['pre_mean']:.4f}
-- Matched Q&A mean: {primary['qa_mean']:.4f}
-- Paired PRE minus Q&A: {primary['mean_paired_pre_minus_qa']:.4f}
-- Paired bootstrap 95% CI: [{primary['bootstrap_ci95'][0]:.4f}, {primary['bootstrap_ci95'][1]:.4f}]
-
-Caliper sensitivity:
-
-| Caliper | Pairs | Mean absolute word gap | PRE minus Q&A | Bootstrap 95% CI |
-| ---: | ---: | ---: | ---: | ---: |
-"""
-    for caliper, item in matching.items():
-        report += f"| {caliper} | {item['pairs']} | {item['mean_absolute_word_difference']:.2f} | {item['mean_paired_pre_minus_qa']:.4f} | [{item['bootstrap_ci95'][0]:.4f}, {item['bootstrap_ci95'][1]:.4f}] |\n"
-    report += f"""
-
-## Flexible Length Control
-
-The additive HC3 OLS controls for centered log word count, squared centered log word count, and calendar-period fixed effects.
-
-- Adjusted Q&A minus PRE at 140 words: {additive_contrast['estimate']:.4f}
-- HC3 95% CI: [{additive_contrast['ci95_low']:.4f}, {additive_contrast['ci95_high']:.4f}]
-- Model R-squared: {additive_model['r_squared']:.4f}
-
-Because PRE and Q&A have different raw score-length slopes, a parsimonious interaction model allows a separate linear Q&A log-length slope while retaining common curvature:
-
-| Words | Adjusted Q&A minus PRE | HC3 95% CI |
-| ---: | ---: | ---: |
-"""
-    for contrast in interaction_contrasts:
-        report += f"| {contrast['word_count']} | {contrast['estimate']:.4f} | [{contrast['ci95_low']:.4f}, {contrast['ci95_high']:.4f}] |\n"
-    report += f"""
-
-- Interaction-model R-squared: {interaction_model['r_squared']:.4f}
-
-## Decision
-
-This diagnostic does not validate the construct. It checks whether the descriptive PRE/Q&A contrast disappears under observed length balancing. The Q&A score-length association remains a mandatory robustness issue for later human/model agreement and full-sample analysis.
-
-{closeout}
-"""
-    report_path = args.output_dir / "specificity_length_robustness_report.md"
-    report_path.write_text(report, encoding="utf-8")
-    print(json.dumps(summary, indent=2))
+        "hc3_ols_additive": additive,
+        "adjusted_qa_minus_pre_additive_at_140_words": qa_minus_pre_contrast(additive, 140),
+        "hc3_ols_with_qa_length_interactions": interaction,
+        "adjusted_qa_minus_pre_interaction_model": [qa_minus_pre_contrast(interaction, w) for w in (100, 140, 180)],
+        "provenance": {"inputs": {key: str(path.resolve()) for key, path in inputs.items()},
+                       "input_sha256": {key: sha256(path) for key, path in inputs.items()},
+                       "script_sha256": sha256(Path(__file__)), "seed": args.seed,
+                       "helper_sha256": {name: sha256(Path(__file__).parent / name)
+                                          for name in ("annotation_contract.py", "aggregate_local_specificity.py")},
+                       "bootstrap_draws": args.bootstrap_draws, "primary_caliper_words": args.primary_caliper,
+                       "numpy_version": np.__version__},
+        "caveats": ["Descriptive unit-level diagnostic, not construct validation or a causal thesis estimator.",
+                    "Period/length matching can pair units from different calls; it is not the primary within-call contrast.",
+                    "Bootstrap intervals resample units, not firms/calls; HC3 is not firm-clustered inference.",
+                    "Undefined/empty-support metrics are null, never zero or evidence of passing.",
+                    "Human references are one-rater measurements, not infallible ground truth.",
+                    "No transcript text or scores are sent to an API or cloud service."]})
+    path = args.output_dir / "specificity_length_robustness_summary.json"
+    path.write_text(json.dumps(summary, indent=2, allow_nan=False) + "\n")
+    report = ["# Specificity Length-Robustness Diagnostic", "",
+              f"- Status: {summary['status']}", f"- Lane: {args.lane}",
+              f"- Scored units: {len(rows)}; excluded: {len(excluded)}",
+              "- Contrast: Q&A minus PRE. Empty or undefined support is reported as null.", "",
+              "## Common 50-200 Word Support", "",
+              json.dumps(summary["common_support"], indent=2, allow_nan=False), "",
+              "## Limits", "", *["- " + item for item in summary["caveats"]], "",
+              "Full matching, regression, correlation and input-identity evidence is in the JSON summary."]
+    (args.output_dir / "specificity_length_robustness_report.md").write_text("\n".join(report) + "\n")
+    print(json.dumps(summary, indent=2, allow_nan=False))
     return 0
 
 

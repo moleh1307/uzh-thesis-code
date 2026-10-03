@@ -6,13 +6,16 @@ presentations (PRE) versus analyst Q&A, with externally anchored CEO changes.
 ## Status
 
 Prepared on 2026-10-03 from the existing research scripts. This is a migration
-baseline, not a completed analysis or a production scoring release. No model
-was run during preparation or targeted repairs. All sixteen tracked software
+baseline, not a completed analysis or a production scoring release. Software
+tests generate no real model scores. All sixteen tracked software
 findings have targeted repairs or explicit deprecation, backed by synthetic
 regressions. This includes issuer/tenure review gates, atomic census resume,
 manifest-ordered fetch materialization and standalone CSV limits. The retired
 PDF batch workflow is disabled, not restored or migrated;
-see [known issues](docs/known-issues.md) before running it.
+see [known issues](docs/known-issues.md) before running it. The subsequent readiness
+repair adds current Q&A-minus-PRE/common-support analysis, pinned length diagnostics,
+current annotation instructions and an explicit detached stage launcher. These
+software checks do not establish scoring quality or approve population inference.
 
 ## Included
 

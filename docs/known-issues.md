@@ -69,31 +69,36 @@ regressions with fake inference. Passing these tests is not production approval.
 
 The checkpoint inherits a repetition penalty of 1.05; it is now explicitly
 guarded, alongside greedy single-beam decoding, and disclosed in the effective config.
-Atomic runner status is now implemented; the detached named-screen launcher
-remains unimplemented. Changed runner hashes intentionally reject old-checkpoint
+Atomic runner status and an explicit detached named-screen launcher are
+implemented. The launcher separates validation, profile capture and scoring;
+capture is not approval and scoring requires explicit confirmation. Changed runner hashes intentionally reject old-checkpoint
 resume; do not overwrite frozen snapshots or rerun them to bypass that guard.
 Do not launch inference from this code repair.
 
 ## Historical Or Protocol-Specific Tools
 
-- `aggregate_local_specificity.py` retains historical PRE-minus-Q&A naming
-  and old crosswalk assumptions. The planned current contrast is Q&A-minus-PRE
-  on matched scorable support. Adapt and verify before using its outputs.
+- `aggregate_local_specificity.py` now uses Q&A-minus-PRE, CEO-word-weighted
+  section means and exact common human/model scorable unit support for comparison.
+  Available-section descriptions are separate from paired-event contrasts.
+  Existing historical outputs are not rewritten. See [analysis contract](analysis-contract.md).
 - The implemented production schema is exactly `ok` and `specificity`, not a
   three-field schema. Other historical schemas are deliberately incompatible.
-- Length-robustness utilities still need current schema/support checks.
-  The length tool requires NumPy; its environment is not locked here yet.
+- Length diagnostics accept current frozen references or receipt-bound model
+  unit results, retain exclusion ledgers and report undefined statistics as null.
+  NumPy is pinned in `requirements-analysis.txt`; use a separate Python >=3.10
+  analysis environment, not the existing Python 3.9 GPU runtime. Unit bootstrap
+  and HC3 results are descriptive, not firm-clustered thesis inference.
 - Fresh evaluation/freezing tools encode the specific 100-unit protocol and
   require separately retained source manifests and proposal materials. They
   are not general-purpose tools for arbitrary sample sizes.
-- The annotation-package generator includes historical instructions. For the
-  current convention, incidental courtesies do not alone imply `mixed`, and
-  uninterpretable sources have missing scores, not procedural zero. Do not
-  start a new annotation round from generated historical instructions.
+- The annotation-package generator now uses the current shared convention:
+  incidental courtesies do not alone imply `mixed`, and uninterpretable sources
+  have missing scores, not procedural zero. Existing annotations are unchanged;
+  this repair does not request another annotation round.
 - The settings JSON is consumed explicitly with `--settings`; its migration status
   still grants no execution approval. The reviewed profile is a separate required gate.
-Closing tracked software findings does not resolve these scientific/protocol
-limitations or certify historical outputs. No real-data regeneration occurred.
+Closing tracked software findings does not resolve scientific/protocol
+limitations or certify historical outputs. No historical output is recertified.
 
 Only a reviewed subset of historical tests is migrated. No claim is made that
 all original tests or the entire research pipeline are reproduced here.
