@@ -11,6 +11,12 @@ CEO episode covering the call date. A second issuer remains ambiguity even if
 only one has a covering tenure. Ambiguous/missing issuer identities appear in
 the review ledger, not the exact panel. Turnover windows reject a mislabeled
 exact input panel rather than accepting its filename as evidence.
+Every exact-panel event must map to one unique roster episode with matching
+issuer/executive/episode keys and tenure boundaries. Its call date must lie
+inside that exact tenure. Missing, duplicate, nonexact or conflicting evidence
+fails before output publication and before call/quarter support is counted;
+endpoint audit notes do not override these checks. Nonexact roster episodes
+without exact-panel calls remain visible as adjacency-review evidence.
 
 Tenure dates are taken from the relevant contiguous CEOANN episode, not pooled
 across an executive's career. Different raw spellings of the same parsed date
@@ -69,6 +75,38 @@ fields, the exact upper bound and a field above it. The real corpus maximum
 has not been measured, so this bound is not a population completeness claim.
 
 ## Historical Workflows
+
+### Bound Speaker-Gate Bundles
+
+New speaker gates declare `speaker_gate_bound_bundle_v1`, alongside the title
+evidence gate version. Their summary binds all ten input files (including the
+resolution audit) and each emitted gate CSV by SHA-256. Producers verify that
+inputs remain unchanged across the build. Consumers verify the exact artifact
+bytes, input bytes and complete external metadata reconciliation, then recompute
+episode support and old/new turnover gates from the verified event rows.
+Counts alone cannot certify executive IDs or pass flags. Duplicate identities,
+substituted gate tables, mismatched source identities and inconsistent support
+or flags fail before extraction writes outputs.
+
+Historical unbound bundles are rejected, even if their title gate is current.
+Do not add hashes to recertify them: a separately authorized fresh build is
+required. Keep the bound source files available; moving the gate CSVs is allowed
+when their bytes and source bindings remain unchanged. For a relocated source
+bundle, update only the recorded paths to the same hash-verified input copies;
+relative input paths resolve against the gate summary directory. These hashes
+detect stale/mixed artifacts, not deliberate falsification of every source.
+
+### Whole-Passage Procedural Eligibility
+
+Extraction and scoring-manifest building use the shared `procedure_kind`
+whole-passage check. A courtesy, laughter marker or clarification phrase inside
+a business answer does not by itself exclude it or send it to source review.
+Recognized fully procedural passages remain excluded; unknown nonprocedural
+content remains visible, not automatically semantically validated. Interrupted
+or corrupted source text and uncertain question/answer boundaries retain their
+separate review flags. Existing labels, frozen samples and prompts are unchanged.
+New block extraction records the `whole_passage_v1_20261003` suffix; the anchored
+extractor records `external_execucomp_bound_speaker_gate_anchor_v2_20261003`.
 
 The older speaker-validation CLI retains its name helpers but now confirms a
 turnover pair only with distinct confirmed old/new events, consistent expected
