@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from specificity_validation import strict_json, validate_result, verify_provenance
+
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
@@ -19,8 +21,8 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
             if not line.strip():
                 continue
             try:
-                rows.append(json.loads(line))
-            except json.JSONDecodeError as exc:
+                rows.append(strict_json(line))
+            except ValueError as exc:
                 raise SystemExit(f"invalid JSONL at {path}:{line_number}: {exc}") from exc
     return rows
 
@@ -64,20 +66,6 @@ def index_results(rows: list[dict[str, Any]], label: str) -> dict[str, dict[str,
     return result
 
 
-def validate_result(row: dict[str, Any] | None) -> tuple[bool, str]:
-    if row is None:
-        return False, "missing output"
-    if row.get("status") != "completed":
-        return False, str(row.get("validation_error") or "output status is not completed")
-    if row.get("validation_error") is not None:
-        return False, f"recorded validation error: {row['validation_error']}"
-    if row.get("output_truncated") is True or row.get("input_context_rejected") is True:
-        return False, "output truncated or input rejected"
-    if "finish_reason" in row and row["finish_reason"] != "eos_token":
-        return False, "generation did not terminate with EOS"
-    return validate_score(row.get("parsed"))
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-jsonl", required=True, type=Path)
@@ -104,6 +92,16 @@ def main() -> int:
         raise SystemExit("empty input cannot count as a passed audit")
     if set(manifest) != expected_ids:
         raise SystemExit("manifest custom_id set does not match input")
+    try:
+        provenance = verify_provenance(args.input_jsonl, args.output_jsonl, args.run_manifest,
+                                       args.manifest_csv, list(inputs.values()), list(outputs.values()))
+        repeat_provenance = (verify_provenance(args.input_jsonl, args.repeat_output_jsonl,
+                             args.repeat_run_manifest, args.manifest_csv,
+                             list(inputs.values()), list(repeats.values())) if repeats is not None else None)
+        if repeat_provenance and repeat_provenance["run_binding_sha256"] != provenance["run_binding_sha256"]:
+            raise ValueError("repeat run execution identity differs from original run")
+    except (ValueError, OSError) as exc:
+        raise SystemExit(f"provenance rejected: {exc}") from exc
     coverage = {"missing_output_ids": sorted(expected_ids - outputs.keys()),
                 "unexpected_output_ids": sorted(outputs.keys() - expected_ids),
                 "missing_repeat_ids": sorted(expected_ids - repeats.keys()) if repeats is not None else [],
@@ -242,7 +240,7 @@ def main() -> int:
         "## Interpretation",
         "",
         "- Technical pass requires all expected IDs and schema-valid completed outputs in both supplied runs; it does not certify substantive scoring quality or satisfy a scientific repeatability threshold.",
-        "- This historical audit validates stored parsed scores; independent whole-raw and provenance validation remains tracked in issue #7. These counts are not proof that whole raw JSON is valid.",
+        "- Whole-raw JSON, token/EOS evidence, parsed equality, schema and exact input/output/unit-metadata run bindings were independently checked. Incompatible historical artifacts are refused rather than upgraded.",
         "- `ok=0` is retained as a manual edge case. It is not silently converted to a 1-5 score or dropped from the source package.",
         "- This audit contains no transcript text; the exact model inputs remain in the local request JSONL.",
     ])
@@ -251,6 +249,8 @@ def main() -> int:
 
     comparison = {
         "status": status,
+        "provenance": provenance,
+        "repeat_provenance": repeat_provenance,
         "input_requests": len(inputs),
         "strict_valid_outputs": strict_valid,
         "row_errors": row_errors,

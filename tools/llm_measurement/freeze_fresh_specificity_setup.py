@@ -64,7 +64,8 @@ def freeze(proposal: Path, package: Path, evaluation: Path, output: Path):
         names = ("review-plan.md", "specificity-system-prompt.txt", "proposed-settings.json", "specificity-production-schema.json")
         for name in names:
             shutil.copyfile(proposal / name, temp / name)
-        for name in ("run_local_specificity.py", "freeze_fresh_specificity_setup.py"):
+        for name in ("run_local_specificity.py", "freeze_fresh_specificity_setup.py",
+                     "specificity_validation.py", "local_execution_identity.py"):
             shutil.copyfile(Path(__file__).with_name(name), temp / name)
         shutil.copyfile(blinded, temp / "blinded_input_snapshot.csv")
         input_path = temp / "specificity_requests_100.jsonl"

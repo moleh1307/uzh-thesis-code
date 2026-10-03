@@ -39,8 +39,8 @@ All entries below are in `tools/llm_measurement/`.
 | `prepare_fresh_evaluation_human_package.py` | Blinded package creation; historical instructions need review |
 | `freeze_fresh_specificity_setup.py` | Protocol-specific prompt/settings/input archive |
 | `freeze_fresh_specificity_reference.py` | Protocol-specific label and missingness freeze |
-| `run_local_specificity.py` | Model execution; blocked by known runner issues |
-| `audit_local_specificity_run.py` | Existing output/repeat diagnostics; current contract check pending |
+| `run_local_specificity.py` | Reviewed offline identity and full-output checks; retry repair still pending |
+| `audit_local_specificity_run.py` | Whole-raw/token/schema/provenance and repeat diagnostics |
 | `aggregate_local_specificity.py` | Historical word-weighted aggregation; sign/support adaptation pending |
 | `analyze_specificity_length_robustness.py` | Length sensitivity; current support and NumPy environment check pending |
 
@@ -66,6 +66,10 @@ environment-based credential interface is future work, not already supported.
 The prompt and output schema in `configs/` are unchanged copies of the reviewed
 deployment artifacts. Settings use generic local paths and disclose inherited
 generation behavior. No actual request JSONL or reference ratings are copied.
+See [execution validation](execution-validation.md) for the new required profile,
+settings and unit-metadata flags. Aggregation now also requires `--input-jsonl`.
+Do not reuse old unbound outputs or change scientific sign/support definitions
+merely to make the repaired consumer accept a file.
 
 ## Verified Scope
 

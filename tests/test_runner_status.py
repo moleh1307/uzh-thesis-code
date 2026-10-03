@@ -15,9 +15,9 @@ class RunnerStatusTests(FakeRunnerCase):
         self.assertEqual(manifest["counts"]["strict_valid_outputs"], 2)
         self.assertEqual(manifest["counts"]["missing_outputs"], 0)
         self.assertEqual(snapshots[0]["status"], "running_local_run")
-        self.assertEqual(snapshots[0]["stage"], "loading_model")
+        self.assertEqual(snapshots[0]["stage"], "scoring")
         running = [row for row in snapshots if row["status"] == "running_local_run"]
-        self.assertEqual([row["counts"]["processed_this_run"] for row in running], [0, 0, 1, 2])
+        self.assertEqual([row["counts"]["processed_this_run"] for row in running], [0, 1, 2])
         self.assertFalse(list(self.root.glob(".*.tmp")))
         self.assertTrue(all(call["do_sample"] is False for call in calls))
 
@@ -53,6 +53,9 @@ class RunnerStatusTests(FakeRunnerCase):
         for max_tokens in (2, 16):
             with self.subTest(max_tokens=max_tokens):
                 self.output.unlink(missing_ok=True)
+                self.manifest.unlink(missing_ok=True)
+                self.profile.unlink(missing_ok=True)
+                self.settings.unlink(missing_ok=True)
                 code, manifest, _ = self.run_fake(eos=False, max_tokens=max_tokens)
                 self.assertEqual(code, 1)
                 self.assertEqual(manifest["counts"]["strict_valid_outputs"], 0)
@@ -90,9 +93,8 @@ class RunnerStatusTests(FakeRunnerCase):
         row["status"] = "error"
         row["validation_error"] = None
         self.output.write_text(json.dumps(row) + "\n")
-        code, manifest, _ = self.run_fake(resume=True)
-        self.assertEqual(code, 1)
-        self.assertEqual(manifest["counts"]["strict_valid_outputs"], 0)
+        with self.assertRaisesRegex(SystemExit, "checksum differs"):
+            self.run_fake(resume=True)
 
     def test_empty_scoring_input_stops_before_model_loading(self):
         self.requests(0)

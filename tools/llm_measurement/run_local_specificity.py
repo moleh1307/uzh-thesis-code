@@ -9,6 +9,7 @@ repairing model output, and writes resumable row-level results.
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import os
@@ -17,6 +18,10 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from local_execution_identity import prepare_backend
+from specificity_validation import (decode_evidence, digest, require_schema,
+                                    validate_result, validate_score, strict_json)
 
 
 def sha256_path(path: Path) -> str:
@@ -34,8 +39,8 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
             if not line.strip():
                 continue
             try:
-                record = json.loads(line)
-            except json.JSONDecodeError as exc:
+                record = strict_json(line)
+            except ValueError as exc:
                 raise SystemExit(f"invalid JSONL at line {line_number}: {exc}") from exc
             records.append(record)
     return records
@@ -46,6 +51,10 @@ def validate_request(record: dict[str, Any]) -> None:
         raise SystemExit(f"unexpected request keys for {record.get('custom_id')}")
     if not isinstance(record["custom_id"], str) or not record["custom_id"]:
         raise SystemExit("request has empty custom_id")
+    try:
+        require_schema(record["response_schema"])
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     messages = record["messages"]
     if not isinstance(messages, list) or len(messages) != 2:
         raise SystemExit(f"request must contain exactly two messages: {record['custom_id']}")
@@ -53,7 +62,7 @@ def validate_request(record: dict[str, Any]) -> None:
         raise SystemExit(f"request roles must be system,user: {record['custom_id']}")
     if not all(isinstance(message.get("content"), str) for message in messages):
         raise SystemExit(f"request message content must be strings: {record['custom_id']}")
-    user_input = json.loads(messages[1]["content"])
+    user_input = strict_json(messages[1]["content"])
     if not isinstance(user_input, dict):
         raise SystemExit(f"user input must be an object: {record['custom_id']}")
     if user_input.get("unit_type") == "pre":
@@ -69,38 +78,12 @@ def validate_request(record: dict[str, Any]) -> None:
 
 
 def validate_output(value: object) -> tuple[bool, str]:
-    if not isinstance(value, dict):
-        return False, "output is not an object"
-    if set(value) != {"ok", "specificity"}:
-        return False, "output keys are not exactly ok,specificity"
-    ok = value["ok"]
-    specificity = value["specificity"]
-    if isinstance(ok, bool) or not isinstance(ok, int) or ok not in {0, 1}:
-        return False, "ok is not integer 0 or 1"
-    if isinstance(specificity, bool) or not isinstance(specificity, int) or not 0 <= specificity <= 5:
-        return False, "specificity is not integer 0 through 5"
-    if ok == 0 and specificity != 0:
-        return False, "ok=0 must have specificity=0"
-    if ok == 1 and specificity == 0:
-        return False, "ok=1 must have specificity 1 through 5"
-    return True, ""
+    return validate_score(value)
 
 
 def extract_json(raw_text: str) -> tuple[object | None, str | None]:
-    def unique_object(pairs):
-        result = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError(f"duplicate JSON key: {key}")
-            result[key] = value
-        return result
-
-    def reject_constant(value):
-        raise ValueError(f"non-finite JSON constant: {value}")
-
     try:
-        return json.loads(raw_text.strip(), object_pairs_hook=unique_object,
-                          parse_constant=reject_constant), None
+        return strict_json(raw_text), None
     except ValueError as exc:
         return None, f"invalid strict JSON: {exc}"
 
@@ -143,11 +126,7 @@ def atomic_json_write(path: Path, value: dict[str, Any]) -> None:
 
 
 def result_is_valid(result: dict[str, Any]) -> bool:
-    return (result.get("status") == "completed"
-            and result.get("validation_error") is None
-            and validate_output(result.get("parsed"))[0]
-            and result.get("output_truncated") is False
-            and result.get("finish_reason") == "eos_token")
+    return validate_result(result)[0]
 
 
 def result_counts(expected_ids: set[str], completed: dict[str, dict[str, Any]],
@@ -184,18 +163,26 @@ def main() -> int:
     parser.add_argument("--input-jsonl", required=True, type=Path)
     parser.add_argument("--output-jsonl", required=True, type=Path)
     parser.add_argument("--run-manifest", required=True, type=Path)
-    parser.add_argument("--model", required=True, help="Hugging Face model ID or local model directory")
+    parser.add_argument("--model", required=True, help="existing local safetensors checkpoint directory")
     parser.add_argument("--revision", default=None)
     parser.add_argument("--max-new-tokens", type=int, default=16)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--contract-version", default="specificity_v1_20260720")
+    parser.add_argument("--settings", type=Path, help="reviewed decoding/runtime settings JSON")
+    parser.add_argument("--execution-profile", type=Path, help="reviewed approved offline execution identity")
+    parser.add_argument("--unit-manifest-csv", type=Path, help="exact unit metadata used by consumers")
+    parser.add_argument("--capture-execution-profile", type=Path,
+                        help="capture an unapproved candidate identity; load locally but do not score")
     args = parser.parse_args()
 
     if args.max_new_tokens <= 0:
         raise SystemExit("--max-new-tokens must be positive")
+    input_hash = sha256_path(args.input_jsonl)
     records = read_jsonl(args.input_jsonl)
+    if sha256_path(args.input_jsonl) != input_hash:
+        raise SystemExit("input changed while being read")
     custom_ids: set[str] = set()
     for record in records:
         validate_request(record)
@@ -217,18 +204,78 @@ def main() -> int:
         raise SystemExit("input, output and run manifest must be distinct files")
     custom_ids = {record["custom_id"] for record in records}
 
+    if args.settings is None or (args.execution_profile is None and not args.capture_execution_profile):
+        raise SystemExit("--settings and --execution-profile required before inference")
+    if not args.capture_execution_profile and args.unit_manifest_csv is None:
+        raise SystemExit("--unit-manifest-csv required to bind downstream metadata")
+    readonly = [args.input_jsonl, args.settings, args.execution_profile, args.unit_manifest_csv]
+    destinations = [args.output_jsonl, args.run_manifest, args.capture_execution_profile]
+    paths = [p.resolve() for p in readonly + destinations if p is not None]
+    if len(set(paths)) != len(paths):
+        raise SystemExit("request/settings/profile/unit metadata and output destinations must be distinct")
+    if args.run_manifest.exists() and not args.resume and not args.capture_execution_profile:
+        raise SystemExit("run manifest already exists; choose a new path or matching --resume")
+    if args.output_jsonl.exists() and not args.resume:
+        raise SystemExit("output already exists; use a new path or an explicitly matching --resume")
+    if args.resume and not args.capture_execution_profile and (
+            not args.output_jsonl.exists() or not args.run_manifest.exists()):
+        raise SystemExit("resume requires both original output and run manifest")
+    unit_hash = None
+    if args.unit_manifest_csv:
+        unit_hash = sha256_path(args.unit_manifest_csv)
+        with args.unit_manifest_csv.open(newline="", encoding="utf-8-sig") as handle:
+            metadata = list(csv.DictReader(handle))
+        ids = [row.get("custom_id") for row in metadata]
+        all_request_ids = {r["custom_id"] for r in read_jsonl(args.input_jsonl)}
+        if len(set(ids)) != len(ids) or set(ids) != all_request_ids:
+            raise SystemExit("unit metadata IDs must match the frozen request input exactly")
+    # Preflight must not rewrite an existing checkpoint or its first-run provenance.
+    try:
+        backend = prepare_backend(args)
+    except (Exception, KeyboardInterrupt) as exc:
+        if args.resume or args.run_manifest.exists() or args.capture_execution_profile:
+            raise SystemExit(f"execution preflight rejected without modifying prior artifacts: {exc}") from exc
+        interrupted_preflight = isinstance(exc, KeyboardInterrupt)
+        failed = {"status": "interrupted_local_run" if interrupted_preflight else "failed_local_run", "stage": "preflight",
+                  "fatal_error": f"{type(exc).__name__}: {exc}",
+                  "counts": result_counts(custom_ids, {}, 0)}
+        atomic_json_write(args.run_manifest, failed)
+        return 130 if interrupted_preflight else 1
+    identity = backend[2]
+    if sha256_path(args.input_jsonl) != input_hash or (
+            unit_hash is not None and sha256_path(args.unit_manifest_csv) != unit_hash):
+        raise SystemExit("request or unit metadata changed during execution preflight")
+    if args.capture_execution_profile:
+        if args.capture_execution_profile.exists():
+            raise SystemExit("candidate profile already exists; choose a new path")
+        atomic_json_write(args.capture_execution_profile,
+                          {"status": "candidate_requires_review", "identity": identity})
+        return 0
+
     completed: dict[str, dict[str, Any]] = {}
     binding = {
-        "input_sha256": sha256_path(args.input_jsonl),
+        "input_sha256": input_hash,
         "runner_sha256": sha256_path(Path(__file__)),
         "model": args.model, "revision": args.revision or "unspecified",
         "contract": args.contract_version, "max_new_tokens": args.max_new_tokens,
         "seed": 0, "limit": args.limit,
+        "execution_identity": identity,
+        "execution_profile_sha256": sha256_path(args.execution_profile),
+        "unit_manifest_sha256": unit_hash,
+        "response_schema_hashes": {r["custom_id"]: digest(r["response_schema"]) for r in records},
+        "validation_module_sha256": sha256_path(Path(__file__).with_name("specificity_validation.py")),
+        "execution_module_sha256": sha256_path(Path(__file__).with_name("local_execution_identity.py")),
     }
-    binding_hash = hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
-    if args.output_jsonl.exists() and not args.resume:
-        raise SystemExit("output already exists; use a new path or an explicitly matching --resume")
+    binding_hash = digest(binding)
+    prior = None
     if args.resume and args.output_jsonl.exists():
+        if not args.run_manifest.exists():
+            raise SystemExit("resume requires original run manifest")
+        prior = strict_json(args.run_manifest.read_text())
+        if prior.get("run_binding") != binding or prior.get("run_binding_sha256") != binding_hash:
+            raise SystemExit("resume execution identity differs; prior provenance left unchanged")
+        if prior.get("output_sha256") is not None and prior["output_sha256"] != sha256_path(args.output_jsonl):
+            raise SystemExit("resume output checksum differs; checkpoint left unchanged")
         for record in read_jsonl(args.output_jsonl):
             custom_id = record.get("custom_id")
             if custom_id not in custom_ids or custom_id in completed:
@@ -240,11 +287,11 @@ def main() -> int:
     args.output_jsonl.parent.mkdir(parents=True, exist_ok=True)
 
     run_manifest = {
-        "created_at_utc": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
+        "created_at_utc": prior["created_at_utc"] if prior else datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
         "status": "running_local_run",
-        "stage": "loading_model",
+        "stage": "scoring",
         "input_jsonl": str(args.input_jsonl.resolve()),
-        "input_sha256": sha256_path(args.input_jsonl),
+        "input_sha256": input_hash,
         "output_jsonl": str(args.output_jsonl.resolve()),
         "output_sha256": None,
         "model": args.model,
@@ -256,6 +303,13 @@ def main() -> int:
         "contract": args.contract_version,
         "privacy": {"licensed_transcript_text_processed": True, "cloud_submitted": False},
         "counts": result_counts(custom_ids, completed, 0),
+        "runtime": identity["runtime"],
+        "effective_generation_config": identity["generation_config"],
+        "actual_device_map": identity["device_map"],
+        "first_run_provenance": (prior["first_run_provenance"] if prior else {
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "execution_identity_sha256": digest(identity),
+            "input_sha256": binding["input_sha256"], "run_binding_sha256": binding_hash}),
     }
     atomic_json_write(args.run_manifest, run_manifest)
     processed = 0
@@ -263,7 +317,7 @@ def main() -> int:
     interrupted = False
     try:
         with args.output_jsonl.open("a", encoding="utf-8") as output_handle:
-            for result in generate_results(args, pending, binding_hash, run_manifest):
+            for result in generate_results(args, pending, binding_hash, backend):
                 output_handle.write(json.dumps(result, ensure_ascii=False, separators=(",", ":")) + "\n")
                 output_handle.flush()
                 os.fsync(output_handle.fileno())
@@ -305,52 +359,14 @@ def main() -> int:
 
 
 def generate_results(args: argparse.Namespace, pending: list[dict[str, Any]],
-                     binding_hash: str, run_manifest: dict[str, Any]):
+                     binding_hash: str, backend):
     """Yield original row evidence; the caller persists it before reporting progress."""
 
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-
-    load_kwargs: dict[str, Any] = {
-        "device_map": "auto",
-        "torch_dtype": torch.bfloat16,
-        "low_cpu_mem_usage": True,
-    }
-    if args.revision:
-        load_kwargs["revision"] = args.revision
-    tokenizer = AutoTokenizer.from_pretrained(args.model, revision=args.revision)
-    model = AutoModelForCausalLM.from_pretrained(args.model, **load_kwargs)
-    model.eval()
+    tokenizer, model, identity = backend
     max_context = context_limit(getattr(model.config, "max_position_embeddings", None),
                                 tokenizer.model_max_length)
     input_device = next(model.parameters()).device
-    seed = 0
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-    for sampling_field in ("temperature", "top_p", "top_k"):
-        if hasattr(model.generation_config, sampling_field):
-            setattr(model.generation_config, sampling_field, None)
-    run_manifest.update({
-        "stage": "scoring",
-        "runtime": {
-            "python": __import__("platform").python_version(),
-            "torch": torch.__version__,
-            "transformers": __import__("transformers").__version__,
-            "cuda_available": bool(torch.cuda.is_available()),
-            "cuda_device_count": torch.cuda.device_count(),
-            "device_map": "auto",
-            "context_limit": max_context,
-        },
-        "decoding": {
-            "do_sample": False,
-            "temperature": "unsupported_not_set_when_do_sample_false",
-            "top_p": "unsupported_not_set_when_do_sample_false",
-            "seed": seed,
-            "max_new_tokens": args.max_new_tokens,
-        },
-    })
-    atomic_json_write(args.run_manifest, run_manifest)
     for record in pending:
         custom_id = record["custom_id"]
         started = time.perf_counter()
@@ -389,12 +405,12 @@ def generate_results(args: argparse.Namespace, pending: list[dict[str, Any]],
                     pad_token_id=tokenizer.eos_token_id,
                 )
             output_tokens = generated[0, input_length:]
-            raw_output = tokenizer.decode(output_tokens, skip_special_tokens=True)
-            result["raw_output_with_special_tokens"] = tokenizer.decode(output_tokens, skip_special_tokens=False)
             eos = model.generation_config.eos_token_id
             if eos is None:
                 eos = tokenizer.eos_token_id
             result.update(termination_metadata(output_tokens.tolist(), eos, args.max_new_tokens))
+            result.update(decode_evidence(tokenizer, output_tokens.tolist(), result["configured_eos_token_ids"]))
+            raw_output = result["raw_output"]
             parsed, parse_error = extract_json(raw_output)
             result["status"] = "completed"
             result["raw_output"] = raw_output
@@ -410,6 +426,7 @@ def generate_results(args: argparse.Namespace, pending: list[dict[str, Any]],
                 result["validation_error"] = result["validation_error"] or "output reached token limit without EOS"
             elif result["finish_reason"] == "unknown":
                 result["validation_error"] = result["validation_error"] or "generation termination is unknown"
+            result["validation_error"] = result.get("token_evidence_error") or result["validation_error"]
         except Exception as exc:  # preserve row-level failure and continue
             result["validation_error"] = f"{type(exc).__name__}: {exc}"
         result["elapsed_seconds"] = round(time.perf_counter() - started, 4)
