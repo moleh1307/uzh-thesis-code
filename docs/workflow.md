@@ -45,7 +45,8 @@ pending issue #14; invalid imports stop rather than coercing them to zero.
 
 ## Technical Run Status
 
-The runner updates its `--run-manifest` atomically while loading/scoring and at
+The runner verifies its backend before modifying an existing checkpoint, then
+updates its `--run-manifest` atomically while scoring and at
 completion/failure. `completed_local_run` and exit 0 require every requested ID
 to be technically valid; failed or incomplete runs use `failed_local_run` and
 exit 1, or `interrupted_local_run` and exit 130 on interruption. Valid model
@@ -55,5 +56,6 @@ The audit similarly returns nonzero on technical failure and writes diagnostics
 for missing/invalid/unexpected outputs. Repeat agreement uses explicitly counted
 valid comparable pairs, with exclusions and the original requested denominator;
 valid abstentions are excluded from numerical-score comparisons. A technical
-pass does not certify scientific quality or a repeatability threshold. Whole-raw
-consumer validation and current-schema adaptation remain pending in issue #7.
+pass does not certify scientific quality or a repeatability threshold. Whole-raw,
+token evidence, schema and provenance checks are now shared by both consumers.
+Incompatible historical artifacts are rejected, not automatically migrated.

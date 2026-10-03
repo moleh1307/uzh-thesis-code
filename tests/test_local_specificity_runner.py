@@ -1,8 +1,10 @@
 import importlib.util
+import sys
 import unittest
 from pathlib import Path
 
 path = Path(__file__).resolve().parents[1] / "tools/llm_measurement/run_local_specificity.py"
+sys.path.insert(0, str(path.parent))
 spec = importlib.util.spec_from_file_location("specificity_runner", path)
 runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)

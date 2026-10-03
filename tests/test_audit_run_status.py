@@ -8,12 +8,20 @@ from pathlib import Path
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "tools/llm_measurement/audit_local_specificity_run.py"
+sys.path.insert(0, str(SCRIPT.parent))
+from specificity_validation import SCHEMA, digest, file_hash
 
 
 def completed(custom_id="u1", score=4, ok=1, **changes):
     parsed = {"ok": ok, "specificity": score}
     row = dict(custom_id=custom_id, status="completed", parsed=parsed,
-               raw_output=json.dumps(parsed), validation_error=None)
+               raw_output=json.dumps(parsed), validation_error=None,
+               raw_output_with_special_tokens=json.dumps(parsed) + "<eos>",
+               generated_token_ids=[3, 9], configured_eos_token_ids=[9],
+               tokenizer_special_token_ids=[8, 9], terminal_eos_token_id=9,
+               terminal_eos_text="<eos>", unexpected_special_token_ids=[],
+               finish_reason="eos_token", output_truncated=False,
+               input_truncated=False, input_context_rejected=False)
     row.update(changes)
     return row
 
@@ -35,22 +43,33 @@ class AuditRunStatusTests(unittest.TestCase):
             path.write_text("".join(json.dumps(row) + "\n" for row in rows))
             return path
 
-        request = jsonl("input.jsonl", [{"custom_id": key} for key in ids])
-        output = jsonl("output.jsonl", outputs)
-        original_output = output.read_bytes()
+        requests = [{"custom_id": key, "response_schema": SCHEMA} for key in ids]
+        request = jsonl("input.jsonl", requests)
         manifest = self.root / "units.csv"
         with manifest.open("w", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=["custom_id", "unit_type"])
             writer.writeheader()
             writer.writerows({"custom_id": key, "unit_type": "qa"} for key in ids)
         run = self.root / "run.json"
-        run.write_text("{}")
+        binding = {"input_sha256": file_hash(request), "unit_manifest_sha256": file_hash(manifest),
+                   "execution_identity": {"synthetic": True}, "contract": "synthetic",
+                   "response_schema_hashes": {r["custom_id"]: digest(SCHEMA) for r in requests}, "limit": None}
+        def bound_output(name, rows, run_path):
+            rows = [dict(r, run_binding_sha256=digest(binding)) for r in rows]
+            path = jsonl(name, rows)
+            run_path.write_text(json.dumps({"run_binding": binding, "run_binding_sha256": digest(binding),
+                "input_sha256": file_hash(request), "output_sha256": file_hash(path), "contract": "synthetic"}))
+            return path
+        output = bound_output("output.jsonl", outputs, run)
+        original_output = output.read_bytes()
         out = self.root / "audit"
         args = [sys.executable, str(SCRIPT), "--input-jsonl", str(request),
                 "--manifest-csv", str(manifest), "--output-jsonl", str(output),
                 "--run-manifest", str(run), "--output-dir", str(out)]
         if repeats is not None:
-            args.extend(["--repeat-output-jsonl", str(jsonl("repeat.jsonl", repeats))])
+            repeat_run = self.root / "repeat_run.json"
+            args.extend(["--repeat-output-jsonl", str(bound_output("repeat.jsonl", repeats, repeat_run)),
+                         "--repeat-run-manifest", str(repeat_run)])
         result = subprocess.run(args, text=True, capture_output=True, timeout=15)
         self.assertEqual(output.read_bytes(), original_output)
         if not expect_report:
@@ -172,7 +191,7 @@ class AuditRunStatusTests(unittest.TestCase):
     def test_missing_raw_values_do_not_count_as_equal_raw(self):
         row = completed(raw_output=None)
         result, report, _ = self.run_audit([row], [row])
-        self.assertEqual(result.returncode, 0)  # Whole-raw verification remains issue #7.
+        self.assertEqual(result.returncode, 1)
         self.assertEqual(report["repeat_raw_comparable_pairs"], 0)
         self.assertEqual(report["repeat_exact_raw_outputs"], 0)
 

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from specificity_validation import strict_json, validate_result, verify_provenance
+
 import argparse
 import csv
 import hashlib
@@ -53,8 +55,8 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
             if not line.strip():
                 continue
             try:
-                value = json.loads(line)
-            except json.JSONDecodeError as exc:
+                value = strict_json(line)
+            except ValueError as exc:
                 raise SystemExit(f"invalid JSONL at {path}:{line_number}: {exc}") from exc
             if not isinstance(value, dict):
                 raise SystemExit(f"JSONL row is not an object at {path}:{line_number}")
@@ -278,8 +280,10 @@ def build_unit_rows(
 ) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for custom_id, source in input_rows.items():
-        output = output_rows[custom_id]
-        valid, model_ok, model_specificity, validation_error = validate_model_score(output.get("parsed"))
+        output = output_rows.get(custom_id, {})
+        valid, validation_error = validate_result(output or None)
+        model_ok = output["parsed"]["ok"] if valid else None
+        model_specificity = output["parsed"]["specificity"] if valid else None
         output_error = output.get("validation_error")
         model_validation_error = str(output_error or validation_error or "")
         if output.get("status") != "completed" and not model_validation_error:
@@ -675,6 +679,7 @@ def build_report(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-manifest", required=True, type=Path)
+    parser.add_argument("--input-jsonl", required=True, type=Path)
     parser.add_argument("--output-jsonl", required=True, type=Path)
     parser.add_argument("--run-manifest", required=True, type=Path)
     parser.add_argument("--call-manifest", type=Path, default=None)
@@ -690,10 +695,16 @@ def main() -> int:
 
     input_rows = index_unique(read_csv_rows(args.input_manifest), "custom_id", "input manifest")
     output_rows = index_unique(read_jsonl(args.output_jsonl), "custom_id", "model output")
-    if set(input_rows) != set(output_rows):
-        missing = sorted(set(input_rows) - set(output_rows))
-        extra = sorted(set(output_rows) - set(input_rows))
-        raise SystemExit(f"input/output custom_id mismatch; missing={missing[:5]}, extra={extra[:5]}")
+    requests = read_jsonl(args.input_jsonl)
+    if not input_rows or set(input_rows) != {r["custom_id"] for r in requests}:
+        raise SystemExit("input request/unit metadata coverage mismatch or empty input")
+    try:
+        provenance = verify_provenance(args.input_jsonl, args.output_jsonl, args.run_manifest,
+                                       args.input_manifest, requests, list(output_rows.values()))
+    except (ValueError, OSError) as exc:
+        raise SystemExit(f"provenance rejected: {exc}") from exc
+    coverage = {"missing_output_ids": sorted(set(input_rows) - set(output_rows)),
+                "unexpected_output_ids": sorted(set(output_rows) - set(input_rows))}
 
     unit_rows = build_unit_rows(input_rows, output_rows)
     call_metadata: dict[str, Mapping[str, str]] = {}
@@ -787,7 +798,10 @@ def main() -> int:
 
     summary = {
         "created_at_utc": timestamp,
-        "status": "completed_diagnostic_aggregation",
+        "status": ("failed_technical_validation" if any(coverage.values()) or
+                   any(r["model_validation_error"] for r in unit_rows) else "completed_diagnostic_aggregation"),
+        "provenance": provenance,
+        "coverage": coverage,
         "scope": "ten-call turnover-focused local specificity anchor",
         "inputs": {key: str(path.resolve()) for key, path in input_paths.items()},
         "input_sha256": {key: sha256_path(path) for key, path in input_paths.items()},
@@ -843,7 +857,7 @@ def main() -> int:
         encoding="utf-8",
     )
     print(json.dumps(summary, indent=2, allow_nan=False))
-    return 0
+    return 1 if summary["status"] == "failed_technical_validation" else 0
 
 
 if __name__ == "__main__":

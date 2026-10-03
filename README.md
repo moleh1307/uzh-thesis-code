@@ -7,14 +7,14 @@ presentations (PRE) versus analyst Q&A, with externally anchored CEO changes.
 
 Prepared on 2026-10-03 from the existing research scripts. This is a migration
 baseline, not a completed analysis or a production scoring release. No model
-was run during preparation or targeted repairs. Issues #5, #1 and #6 now have
-synthetic regression coverage for annotation persistence and failure reporting;
+was run during preparation or targeted repairs. Issues #5, #1, #6, #2, #3 and #7 now have
+synthetic regression coverage for persistence, execution identity, full-output validation and diagnostics;
 the scoring runner still has known execution issues;
 see [known issues](docs/known-issues.md) before running it.
 
 ## Included
 
-- 24 pipeline/helper modules: CCTS retrieval, ExecuComp matching, CEO identity,
+- Pipeline/helper modules: CCTS retrieval, ExecuComp matching, CEO identity,
   PRE/Q&A extraction, sample construction, evaluation and scoring utilities.
 - The local annotation dashboard's source, not its inputs or saved labels.
 - The unchanged reviewed scoring prompt/schema and machine-neutral settings.
@@ -38,8 +38,8 @@ python3 -m venv .venv
 .venv/bin/python -m unittest discover -s tests/known_behavior -v
 ```
 
-The last suite characterizes existing runner bugs with fake inference. Its
-passing results confirm those bugs still exist; they do not approve execution.
+The last suite characterizes the remaining technical-retry bug (#4) with fake inference.
+Its passing result confirms that bug still exists; it does not approve execution.
 Tests do not connect to a database, load weights, use a GPU or call an API.
 
 ## Reproduction And Workflow
@@ -47,6 +47,9 @@ Tests do not connect to a database, load weights, use a GPU or call an API.
 See the [ordered script inventory](docs/reproduction.md),
 [settings reference](configs/specificity-settings.reference.json) and
 [coding workflow](docs/workflow.md).
+The runner now requires a reviewed local execution profile and exact unit metadata;
+see [execution and output checks](docs/execution-validation.md). Historical outputs
+without the required evidence cannot be silently consumed by the repaired tools.
 
 Use this checkout for new code changes. Original research snapshots remain historical evidence;
 do not edit them or rerun old commands simply because this copy exists.
