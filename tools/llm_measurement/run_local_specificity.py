@@ -11,6 +11,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -126,6 +128,44 @@ def context_limit(model_limit, tokenizer_limit) -> int:
     return min(limits)
 
 
+def atomic_json_write(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(value, indent=2) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def result_is_valid(result: dict[str, Any]) -> bool:
+    return (result.get("status") == "completed"
+            and result.get("validation_error") is None
+            and validate_output(result.get("parsed"))[0]
+            and result.get("output_truncated") is False
+            and result.get("finish_reason") == "eos_token")
+
+
+def result_counts(expected_ids: set[str], completed: dict[str, dict[str, Any]],
+                  processed: int) -> dict[str, int]:
+    results = [completed[key] for key in expected_ids if key in completed]
+    valid_count = sum(result_is_valid(row) for row in results)
+    return {
+        "requested": len(expected_ids),
+        "processed_this_run": processed,
+        "completed_status": sum(row.get("status") == "completed" for row in results),
+        "row_errors": sum(row.get("status") == "error" for row in results),
+        "strict_valid_outputs": valid_count,
+        "invalid_or_error_outputs": len(results) - valid_count,
+        "missing_outputs": len(expected_ids - completed.keys()),
+        "unexpected_outputs": len(completed.keys() - expected_ids),
+    }
+
+
 def validate_only(input_path: Path) -> int:
     records = read_jsonl(input_path)
     custom_ids: set[str] = set()
@@ -171,6 +211,10 @@ def main() -> int:
         if args.limit <= 0:
             raise SystemExit("--limit must be positive")
         records = records[: args.limit]
+    if not records:
+        raise SystemExit("no scoring requests; an empty run cannot count as successful")
+    if len({args.input_jsonl.resolve(), args.output_jsonl.resolve(), args.run_manifest.resolve()}) != 3:
+        raise SystemExit("input, output and run manifest must be distinct files")
     custom_ids = {record["custom_id"] for record in records}
 
     completed: dict[str, dict[str, Any]] = {}
@@ -195,6 +239,75 @@ def main() -> int:
     pending = [record for record in records if record["custom_id"] not in completed]
     args.output_jsonl.parent.mkdir(parents=True, exist_ok=True)
 
+    run_manifest = {
+        "created_at_utc": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
+        "status": "running_local_run",
+        "stage": "loading_model",
+        "input_jsonl": str(args.input_jsonl.resolve()),
+        "input_sha256": sha256_path(args.input_jsonl),
+        "output_jsonl": str(args.output_jsonl.resolve()),
+        "output_sha256": None,
+        "model": args.model,
+        "revision": args.revision or "unspecified",
+        "run_binding": binding,
+        "run_binding_sha256": binding_hash,
+        "output_validation": "whole_raw_JSON_no_salvage_duplicate_and_nonfinite_rejection",
+        "completion_policy": "all_requested_ids_completed_schema_valid_and_eos_terminated",
+        "contract": args.contract_version,
+        "privacy": {"licensed_transcript_text_processed": True, "cloud_submitted": False},
+        "counts": result_counts(custom_ids, completed, 0),
+    }
+    atomic_json_write(args.run_manifest, run_manifest)
+    processed = 0
+    fatal_error = None
+    interrupted = False
+    try:
+        with args.output_jsonl.open("a", encoding="utf-8") as output_handle:
+            for result in generate_results(args, pending, binding_hash, run_manifest):
+                output_handle.write(json.dumps(result, ensure_ascii=False, separators=(",", ":")) + "\n")
+                output_handle.flush()
+                os.fsync(output_handle.fileno())
+                completed[result["custom_id"]] = result
+                processed += 1
+                counts = run_manifest["counts"]
+                valid = result_is_valid(result)
+                counts["processed_this_run"] = processed
+                counts["completed_status"] += int(result["status"] == "completed")
+                counts["row_errors"] += int(result["status"] == "error")
+                counts["strict_valid_outputs"] += int(valid)
+                counts["invalid_or_error_outputs"] += int(not valid)
+                counts["missing_outputs"] -= 1
+                run_manifest["updated_at_utc"] = datetime.now(timezone.utc).isoformat()
+                atomic_json_write(args.run_manifest, run_manifest)
+                print(f"{processed}/{len(pending)} {result['custom_id']} {result['status']} "
+                      f"{result['validation_error'] or 'valid'}", flush=True)
+    except KeyboardInterrupt:
+        fatal_error = "KeyboardInterrupt: scoring interrupted"
+        interrupted = True
+    except Exception as exc:
+        fatal_error = f"{type(exc).__name__}: {exc}"
+
+    counts = result_counts(custom_ids, completed, processed)
+    success = (fatal_error is None and counts["strict_valid_outputs"] == counts["requested"]
+               and counts["missing_outputs"] == 0 and counts["unexpected_outputs"] == 0)
+    run_manifest.update({
+        "status": ("interrupted_local_run" if interrupted else
+                   "completed_local_run" if success else "failed_local_run"),
+        "stage": "finished",
+        "counts": counts,
+        "fatal_error": fatal_error,
+        "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "output_sha256": sha256_path(args.output_jsonl) if args.output_jsonl.exists() else None,
+    })
+    atomic_json_write(args.run_manifest, run_manifest)
+    print(json.dumps(run_manifest, indent=2))
+    return 130 if interrupted else 0 if success else 1
+
+
+def generate_results(args: argparse.Namespace, pending: list[dict[str, Any]],
+                     binding_hash: str, run_manifest: dict[str, Any]):
+    """Yield original row evidence; the caller persists it before reporting progress."""
+
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -218,91 +331,8 @@ def main() -> int:
     for sampling_field in ("temperature", "top_p", "top_k"):
         if hasattr(model.generation_config, sampling_field):
             setattr(model.generation_config, sampling_field, None)
-
-    started_at = datetime.now(timezone.utc)
-    with args.output_jsonl.open("a", encoding="utf-8") as output_handle:
-        for index, record in enumerate(pending, start=1):
-            custom_id = record["custom_id"]
-            started = time.perf_counter()
-            result: dict[str, Any] = {
-                "custom_id": custom_id,
-                "status": "error",
-                "raw_output": None,
-                "parsed": None,
-                "validation_error": None,
-                "input_tokens": None,
-                "output_tokens": None,
-                "elapsed_seconds": None,
-                "run_binding_sha256": binding_hash,
-                "finish_reason": None,
-                "output_truncated": None,
-                "input_truncated": False,
-                "input_context_rejected": False,
-            }
-            try:
-                prompt = tokenizer.apply_chat_template(
-                    record["messages"], tokenize=False, add_generation_prompt=True
-                )
-                encoded = tokenizer(prompt, return_tensors="pt", truncation=False)
-                encoded = {key: value.to(input_device) for key, value in encoded.items()}
-                input_length = int(encoded["input_ids"].shape[1])
-                result["input_tokens"] = input_length
-                if input_length + args.max_new_tokens > max_context:
-                    result["input_context_rejected"] = True
-                    raise ValueError("input plus output allowance exceeds context limit; not truncated")
-                with torch.inference_mode():
-                    generated = model.generate(
-                        **encoded,
-                        do_sample=False,
-                        max_new_tokens=args.max_new_tokens,
-                        use_cache=True,
-                        pad_token_id=tokenizer.eos_token_id,
-                    )
-                output_tokens = generated[0, input_length:]
-                raw_output = tokenizer.decode(output_tokens, skip_special_tokens=True)
-                result["raw_output_with_special_tokens"] = tokenizer.decode(output_tokens, skip_special_tokens=False)
-                eos = model.generation_config.eos_token_id
-                if eos is None:
-                    eos = tokenizer.eos_token_id
-                result.update(termination_metadata(output_tokens.tolist(), eos, args.max_new_tokens))
-                parsed, parse_error = extract_json(raw_output)
-                result["status"] = "completed"
-                result["raw_output"] = raw_output
-                result["input_tokens"] = input_length
-                result["output_tokens"] = int(output_tokens.shape[0])
-                if parse_error:
-                    result["validation_error"] = parse_error
-                else:
-                    valid, validation_error = validate_output(parsed)
-                    result["parsed"] = parsed
-                    result["validation_error"] = None if valid else validation_error
-                if result["output_truncated"]:
-                    result["validation_error"] = result["validation_error"] or "output reached token limit without EOS"
-                elif result["finish_reason"] == "unknown":
-                    result["validation_error"] = result["validation_error"] or "generation termination is unknown"
-            except Exception as exc:  # preserve row-level failure and continue
-                result["validation_error"] = f"{type(exc).__name__}: {exc}"
-            result["elapsed_seconds"] = round(time.perf_counter() - started, 4)
-            output_handle.write(json.dumps(result, ensure_ascii=False, separators=(",", ":")) + "\n")
-            output_handle.flush()
-            print(f"{index}/{len(pending)} {custom_id} {result['status']} {result['validation_error'] or 'valid'}", flush=True)
-            completed[custom_id] = result
-
-    all_results = [completed[record["custom_id"]] for record in records]
-    valid_count = sum(result["validation_error"] is None for result in all_results)
-    error_count = sum(result["status"] == "error" for result in all_results)
-    run_manifest = {
-        "created_at_utc": started_at.strftime("%Y%m%dT%H%M%SZ"),
-        "status": "completed_local_run",
-        "input_jsonl": str(args.input_jsonl.resolve()),
-        "input_sha256": sha256_path(args.input_jsonl),
-        "output_jsonl": str(args.output_jsonl.resolve()),
-        "output_sha256": sha256_path(args.output_jsonl),
-        "model": args.model,
-        "revision": args.revision or "unspecified",
-        "run_binding": binding,
-        "run_binding_sha256": binding_hash,
-        "output_validation": "whole_raw_JSON_no_salvage_duplicate_and_nonfinite_rejection",
+    run_manifest.update({
+        "stage": "scoring",
         "runtime": {
             "python": __import__("platform").python_version(),
             "torch": torch.__version__,
@@ -319,24 +349,71 @@ def main() -> int:
             "seed": seed,
             "max_new_tokens": args.max_new_tokens,
         },
-        "counts": {
-            "requested": len(records),
-            "processed_this_run": len(pending),
-            "completed_status": sum(result["status"] == "completed" for result in all_results),
-            "row_errors": error_count,
-            "strict_valid_outputs": valid_count,
-            "invalid_or_error_outputs": len(all_results) - valid_count,
-        },
-        "contract": args.contract_version,
-        "privacy": {
-            "licensed_transcript_text_processed": True,
-            "cloud_submitted": False,
-        },
-    }
-    args.run_manifest.parent.mkdir(parents=True, exist_ok=True)
-    args.run_manifest.write_text(json.dumps(run_manifest, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps(run_manifest, indent=2))
-    return 0
+    })
+    atomic_json_write(args.run_manifest, run_manifest)
+    for record in pending:
+        custom_id = record["custom_id"]
+        started = time.perf_counter()
+        result: dict[str, Any] = {
+            "custom_id": custom_id,
+            "status": "error",
+            "raw_output": None,
+            "parsed": None,
+            "validation_error": None,
+            "input_tokens": None,
+            "output_tokens": None,
+            "elapsed_seconds": None,
+            "run_binding_sha256": binding_hash,
+            "finish_reason": None,
+            "output_truncated": None,
+            "input_truncated": False,
+            "input_context_rejected": False,
+        }
+        try:
+            prompt = tokenizer.apply_chat_template(
+                record["messages"], tokenize=False, add_generation_prompt=True
+            )
+            encoded = tokenizer(prompt, return_tensors="pt", truncation=False)
+            encoded = {key: value.to(input_device) for key, value in encoded.items()}
+            input_length = int(encoded["input_ids"].shape[1])
+            result["input_tokens"] = input_length
+            if input_length + args.max_new_tokens > max_context:
+                result["input_context_rejected"] = True
+                raise ValueError("input plus output allowance exceeds context limit; not truncated")
+            with torch.inference_mode():
+                generated = model.generate(
+                    **encoded,
+                    do_sample=False,
+                    max_new_tokens=args.max_new_tokens,
+                    use_cache=True,
+                    pad_token_id=tokenizer.eos_token_id,
+                )
+            output_tokens = generated[0, input_length:]
+            raw_output = tokenizer.decode(output_tokens, skip_special_tokens=True)
+            result["raw_output_with_special_tokens"] = tokenizer.decode(output_tokens, skip_special_tokens=False)
+            eos = model.generation_config.eos_token_id
+            if eos is None:
+                eos = tokenizer.eos_token_id
+            result.update(termination_metadata(output_tokens.tolist(), eos, args.max_new_tokens))
+            parsed, parse_error = extract_json(raw_output)
+            result["status"] = "completed"
+            result["raw_output"] = raw_output
+            result["input_tokens"] = input_length
+            result["output_tokens"] = int(output_tokens.shape[0])
+            if parse_error:
+                result["validation_error"] = parse_error
+            else:
+                valid, validation_error = validate_output(parsed)
+                result["parsed"] = parsed
+                result["validation_error"] = None if valid else validation_error
+            if result["output_truncated"]:
+                result["validation_error"] = result["validation_error"] or "output reached token limit without EOS"
+            elif result["finish_reason"] == "unknown":
+                result["validation_error"] = result["validation_error"] or "generation termination is unknown"
+        except Exception as exc:  # preserve row-level failure and continue
+            result["validation_error"] = f"{type(exc).__name__}: {exc}"
+        result["elapsed_seconds"] = round(time.perf_counter() - started, 4)
+        yield result
 
 
 if __name__ == "__main__":
