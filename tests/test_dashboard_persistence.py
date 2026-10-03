@@ -2,8 +2,11 @@ import csv
 import importlib.util
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 
 PATH = Path(__file__).resolve().parents[1] / "tools/llm_measurement/human_audit_dashboard/server.py"
@@ -151,6 +154,49 @@ class DashboardPersistenceTests(unittest.TestCase):
         with self.assertRaises(dashboard.PersistenceConflict):
             self.store()
         self.assertEqual(self.snapshot(), before)
+
+    def test_boolean_progress_score_is_rejected_without_rewriting(self):
+        self.store().save(self.label())
+        state = json.loads(self.progress.read_text())
+        state["labels"]["u1"]["human_specificity"] = True
+        self.progress.write_text(json.dumps(state))
+        before = self.snapshot()
+        with self.assertRaises(dashboard.PersistenceConflict):
+            self.store()
+        self.assertEqual(self.snapshot(), before)
+
+    def test_http_save_and_export_report_conflict_after_external_edit(self):
+        store = self.store()
+        server = dashboard.DashboardServer(("127.0.0.1", 0), PATH.parent, store)
+        original_log = server.RequestHandlerClass.log_message
+        server.RequestHandlerClass.log_message = lambda *args: None
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01})
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        try:
+            request = Request(base + "/api/label", data=json.dumps(self.label()).encode(),
+                              headers={"Content-Type": "application/json"})
+            with urlopen(request, timeout=2) as response:
+                self.assertEqual(response.status, 200)
+            with urlopen(base + "/api/export", timeout=2) as response:
+                self.assertIn(b"Synthetic annotation", response.read())
+            self.edit()
+            before = self.snapshot()
+            request = Request(base + "/api/label", data=json.dumps(self.label("u2", 3)).encode(),
+                              headers={"Content-Type": "application/json"})
+            for operation in (request, base + "/api/export"):
+                with self.assertRaises(HTTPError) as caught:
+                    urlopen(operation, timeout=2)
+                self.assertEqual(caught.exception.code, 409)
+                self.assertIn("annotation files changed", json.loads(caught.exception.read())["error"])
+                caught.exception.close()
+            self.assertEqual(self.snapshot(), before)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+            server.RequestHandlerClass.log_message = original_log
+            self.assertFalse(thread.is_alive())
 
     def test_source_hash_mismatch_preserves_files(self):
         self.store().save(self.label())

@@ -251,9 +251,9 @@ class AuditStore:
         specificity = payload.get("human_specificity")
         content_class = str(payload.get("human_content_class", "")).strip()
         notes = str(payload.get("human_notes", "")).strip()
-        if human_ok not in (0, 1):
+        if type(human_ok) is not int or human_ok not in (0, 1):
             raise ValueError("human_ok must be 0 or 1")
-        if not isinstance(specificity, int):
+        if type(specificity) is not int:
             raise ValueError("human_specificity must be an integer")
         if self.content_class_required:
             allowed_classes = {"substantive", "mixed", "procedural_only", "uncertain"}
