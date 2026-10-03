@@ -21,7 +21,11 @@ The priority integrity repair covers issues #23, #33 and #29: whole-passage
 procedural selection, source-bound speaker-gate bundles, and per-call tenure
 roster reconciliation. Historical unbound gates require an explicitly authorized
 fresh build. The eleven findings from the subsequent review remain tracked as
-open GitHub issues; this repair does not resolve the other eight findings.
+open GitHub issues by explicit request. The remaining eight now have targeted
+repairs and synthetic regressions: standalone frozen code dependencies, relative
+latest links, local census scope, empty-Q&A packages, no-overwrite publication,
+length-metadata binding, pending-save drafts and source/code-bound fetch resume.
+Issue state is deliberately separate from implementation status.
 See [data integrity](docs/data-integrity.md) for the new contracts.
 
 ## Included
@@ -47,9 +51,11 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements-dev.txt
 .venv/bin/python -m unittest discover -s tools/ccts_database/tests -v
 .venv/bin/python -m unittest discover -s tests -v
+node --test tests/dashboard_save.test.js
 ```
 
 Tests do not connect to a database, load weights, use a GPU or call an API.
+Dashboard tests require Node.js 18 or newer; CI uses Node.js 22.
 
 ## Reproduction And Workflow
 

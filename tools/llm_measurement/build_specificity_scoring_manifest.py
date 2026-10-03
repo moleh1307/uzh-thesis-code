@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from csv_contract import configure_csv
+from artifact_publication import fresh_artifact_directory
 
 configure_csv()
 from typing import Iterable, Sequence
@@ -24,6 +25,19 @@ from ccts_qa_episodes import procedure_kind, source_quality_reasons
 
 SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?])\s+")
 WHITESPACE_RE = re.compile(r"\s+")
+
+PRE_FIELDS = ["custom_id", "unit_type", "event_id", "episode_rank", "turnover_id", "turnover_side",
+              "expected_execid", "start_date", "calendar_quarter", "source_turn_index",
+              "source_sequence_id", "source_raw_sequence_id", "chunk_index", "unit_word_count",
+              "ceo_presentation_segment", "prompt_input_json"]
+QA_FIELDS = ["custom_id", "unit_type", "block_id", "event_id", "episode_rank", "turnover_id",
+             "turnover_side", "expected_execid", "start_date", "calendar_quarter",
+             "question_word_count", "unit_word_count", "analyst_question", "ceo_answer", "prompt_input_json"]
+COVERAGE_FIELDS = ["event_id", "episode_rank", "turnover_id", "turnover_side", "expected_execid",
+                   "expected_ceo_name", "company_id", "company_name", "start_date", "calendar_quarter",
+                   "pre_unit_count", "pre_scored_word_count", "source_pre_word_count", "high_qa_unit_count",
+                   "high_qa_scored_word_count", "source_all_ceo_qa_word_count", "high_qa_word_coverage",
+                   "primary_specificity_call_eligible", "qa_quality_screen_call_eligible"]
 
 
 def read_csv(path: Path) -> list[dict[str, str]]:
@@ -291,22 +305,8 @@ def turnover_count(
     )
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--presentations", required=True, type=Path)
-    parser.add_argument("--high-qa-blocks", required=True, type=Path)
-    parser.add_argument("--turnover-gate", required=True, type=Path)
-    parser.add_argument("--contract-dir", required=True, type=Path)
-    parser.add_argument("--output-dir", required=True, type=Path)
-    parser.add_argument("--max-pre-words", type=int, default=150)
-    parser.add_argument("--min-pre-fragment-words", type=int, default=50)
-    parser.add_argument("--force", action="store_true")
-    args = parser.parse_args()
-
+def build_package(args, stage):
     summary_path = args.output_dir / "specificity_manifest_summary.json"
-    if summary_path.exists() and not args.force:
-        raise SystemExit(f"output exists; pass --force to replace: {summary_path}")
-    args.output_dir.mkdir(parents=True, exist_ok=True)
 
     presentations = read_csv(args.presentations)
     blocks = read_csv(args.high_qa_blocks)
@@ -333,11 +333,11 @@ def main() -> int:
     qa_path = args.output_dir / "qa_specificity_scoring_units.csv"
     coverage_path = args.output_dir / "specificity_call_coverage.csv"
     qa_exclusions_path = args.output_dir / "qa_specificity_excluded_non_substantive.csv"
-    write_csv(pre_path, pre_units, list(pre_units[0]))
-    write_csv(qa_path, qa_units, list(qa_units[0]))
-    write_csv(coverage_path, coverage, list(coverage[0]))
+    write_csv(stage / pre_path.name, pre_units, PRE_FIELDS)
+    write_csv(stage / qa_path.name, qa_units, QA_FIELDS)
+    write_csv(stage / coverage_path.name, coverage, COVERAGE_FIELDS)
     write_csv(
-        qa_exclusions_path,
+        stage / qa_exclusions_path.name,
         qa_exclusions,
         [
             "block_id", "event_id", "question_word_count", "ceo_answer_word_count",
@@ -401,7 +401,7 @@ def main() -> int:
             "contract_file_sha256": {
                 path.name: sha256(path) for path in contract_files
             },
-            "qa_non_substantive_gate": "qa_non_substantive_v1_20260720",
+            "qa_non_substantive_gate": "whole_passage_v1_20261003",
         },
         "privacy": {
             "contains_licensed_transcript_text": True,
@@ -409,7 +409,7 @@ def main() -> int:
             "handling": "Keep local on the thesis SSD until the license/API boundary is explicitly resolved.",
         },
     }
-    summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    (stage / summary_path.name).write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 
     report = [
         "# Local Specificity Scoring Manifest v1",
@@ -443,9 +443,28 @@ def main() -> int:
         "- Equal-unit mean, median, and common 50-200 word support are pre-specified sensitivity measures.",
         "- The model/provider is not frozen and licensed text must not be submitted externally yet.",
     ]
-    (args.output_dir / "specificity_manifest_report.md").write_text(
+    (stage / "specificity_manifest_report.md").write_text(
         "\n".join(report) + "\n", encoding="utf-8"
     )
+    return summary
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--presentations", required=True, type=Path)
+    parser.add_argument("--high-qa-blocks", required=True, type=Path)
+    parser.add_argument("--turnover-gate", required=True, type=Path)
+    parser.add_argument("--contract-dir", required=True, type=Path)
+    parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--max-pre-words", type=int, default=150)
+    parser.add_argument("--min-pre-fragment-words", type=int, default=50)
+    parser.add_argument("--force", action="store_true", help="Deprecated; existing packages cannot be replaced")
+    args = parser.parse_args()
+    if args.max_pre_words < 1 or args.min_pre_fragment_words < 1:
+        parser.error("PRE chunk limits must be positive")
+    args.output_dir = args.output_dir.absolute()
+    with fresh_artifact_directory(args.output_dir) as stage:
+        summary = build_package(args, stage)
     print(json.dumps(summary, indent=2))
     return 0
 

@@ -39,7 +39,11 @@ AUDIT_COLUMNS = [
     "database_rows", "database_min_sequence_id", "database_max_sequence_id", "fetched_rows",
     "fetched_pre_rows", "fetched_qa_rows", "fetch_status", "fetch_notes",
 ]
-CHECKPOINT_SCHEMA = 1
+CHECKPOINT_SCHEMA = 2
+
+
+class CheckpointBindingError(RuntimeError):
+    """A shard belongs to a different source or extractor contract."""
 
 
 def clean(value: Any) -> str:
@@ -257,7 +261,7 @@ def checkpoint_paths(checkpoint_dir: Path, key: str) -> tuple[Path, Path, Path]:
 
 
 def read_valid_checkpoint(
-    checkpoint_dir: Path, key: str, manifest_ids: set[str]
+    checkpoint_dir: Path, key: str, manifest_ids: set[str], run_binding_sha256: str | None = None
 ) -> dict[str, Any] | None:
     turns_path, audit_path, marker_path = checkpoint_paths(checkpoint_dir, key)
     if not (turns_path.is_file() and audit_path.is_file() and marker_path.is_file()):
@@ -266,6 +270,8 @@ def read_valid_checkpoint(
         marker = json.loads(marker_path.read_text(encoding="utf-8"))
         if not isinstance(marker, dict):
             return None
+        if run_binding_sha256 is not None and marker.get("run_binding_sha256") != run_binding_sha256:
+            raise CheckpointBindingError("Checkpoint source/extractor binding mismatch; use a fresh output directory.")
         event_ids = marker.get("event_ids")
         if (
             marker.get("schema") != CHECKPOINT_SCHEMA
@@ -291,14 +297,14 @@ def read_valid_checkpoint(
 
 
 def load_valid_checkpoints(
-    checkpoint_dir: Path, event_ids: Sequence[str]
+    checkpoint_dir: Path, event_ids: Sequence[str], run_binding_sha256: str | None = None
 ) -> list[dict[str, Any]]:
     manifest_ids = set(event_ids)
     checkpoints: list[dict[str, Any]] = []
     completed_ids: set[str] = set()
     for marker_path in sorted(checkpoint_dir.glob("batch_*.done.json")):
         key = marker_path.name.removesuffix(".done.json")
-        marker = read_valid_checkpoint(checkpoint_dir, key, manifest_ids)
+        marker = read_valid_checkpoint(checkpoint_dir, key, manifest_ids, run_binding_sha256)
         if marker is None:
             continue
         overlap = completed_ids.intersection(marker["event_ids"])
@@ -319,12 +325,14 @@ def save_checkpoint(
     event_ids: Sequence[str],
     turns: Sequence[Mapping[str, Any]],
     audits: Sequence[Mapping[str, Any]],
+    run_binding_sha256: str | None = None,
 ) -> None:
     turns_path, audit_path, marker_path = checkpoint_paths(checkpoint_dir, key)
     atomic_write_csv(turns_path, TURN_COLUMNS, turns)
     atomic_write_csv(audit_path, AUDIT_COLUMNS, audits)
     marker = {
         "schema": CHECKPOINT_SCHEMA,
+        "run_binding_sha256": run_binding_sha256,
         "checkpoint_key": key,
         "event_ids": list(event_ids),
         "turn_rows": len(turns),
@@ -405,7 +413,10 @@ def prepare_run_config(
     output_dir: Path,
     manifest_path: Path,
     full_manifest: Sequence[Mapping[str, str]],
+    source_identity: Mapping[str, Any],
 ) -> tuple[Path, dict[str, Any]]:
+    if set(source_identity) != {"host", "dbname", "user", "port", "sslmode"}:
+        raise ValueError("Source identity must contain only host, dbname, user, port, and sslmode.")
     checkpoint_dir = output_dir / "checkpoints"
     config_path = output_dir / "fetch_run_config.json"
     event_digest = hashlib.sha256(
@@ -413,17 +424,27 @@ def prepare_run_config(
     ).hexdigest()
     config = {
         "schema": CHECKPOINT_SCHEMA,
-        "manifest": str(manifest_path),
+        "manifest": str(manifest_path.resolve()),
         "manifest_sha256": sha256_file(manifest_path),
         "manifest_events": len(full_manifest),
         "manifest_event_ids_sha256": event_digest,
+        "source_identity": dict(source_identity),
+        "extraction_identity": {
+            "runner_sha256": sha256_file(Path(__file__)),
+            "csv_contract_sha256": sha256_file(Path(__file__).resolve().parents[1] / "csv_contract.py"),
+            "turn_columns": TURN_COLUMNS,
+            "audit_columns": AUDIT_COLUMNS,
+        },
     }
+    config["run_binding_sha256"] = hashlib.sha256(
+        json.dumps(config, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
     if config_path.exists():
         saved = json.loads(config_path.read_text(encoding="utf-8"))
         if saved != config:
             raise ValueError(
-                "This output directory belongs to a different manifest. "
-                "Resume with the same manifest or use a fresh output directory."
+                "This output directory has a different manifest, source, extractor, or historical unbound contract. "
+                "Resume with the same contract or use a fresh output directory."
             )
     else:
         legacy_outputs = [
@@ -447,9 +468,10 @@ def write_outputs(
     full_manifest: Sequence[Mapping[str, str]],
     checkpoint_dir: Path,
     scope_event_ids: Sequence[str],
+    run_binding_sha256: str,
 ) -> dict[str, Any]:
     manifest_ids = [str(event["event_id"]) for event in full_manifest]
-    checkpoints = load_valid_checkpoints(checkpoint_dir, manifest_ids)
+    checkpoints = load_valid_checkpoints(checkpoint_dir, manifest_ids, run_binding_sha256)
     turns_path = output_dir / "ccts_turns.csv"
     audit_path = output_dir / "ccts_turn_fetch_audit.csv"
     turn_count = materialize_csv(turns_path, TURN_COLUMNS, checkpoint_dir, checkpoints, "turns", manifest_ids)
@@ -474,6 +496,7 @@ def write_outputs(
         "turns_csv": str(turns_path),
         "audit_csv": str(audit_path),
         "checkpoint_dir": str(checkpoint_dir),
+        "run_binding_sha256": run_binding_sha256,
     }
     atomic_write_json(output_dir / "ccts_turn_fetch_summary.json", summary)
     atomic_write_json(
@@ -500,6 +523,7 @@ def main() -> int:
     parser.add_argument("--connect-timeout", type=int, default=30)
     parser.add_argument("--statement-timeout-ms", type=int, default=30000)
     parser.add_argument("--sslmode", default="disable")
+    parser.add_argument("--port", type=int, default=5432)
     parser.add_argument(
         "--batch-size",
         type=int,
@@ -512,13 +536,18 @@ def main() -> int:
         parser.error("--batch-size must be at least 1")
     if args.limit_events is not None and args.limit_events < 1:
         parser.error("--limit-events must be at least 1")
+    if not 1 <= args.port <= 65535:
+        parser.error("--port must be between 1 and 65535")
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
     full_manifest = normalize_manifest(read_csv(args.manifest), None)
     manifest = full_manifest[:args.limit_events] if args.limit_events is not None else full_manifest
-    checkpoint_dir, _ = prepare_run_config(args.output_dir, args.manifest, full_manifest)
+    creds = read_credentials(args.credentials)
+    source_identity = {key: creds[key] for key in ("host", "dbname", "user")}
+    source_identity.update(port=args.port, sslmode=args.sslmode)
+    checkpoint_dir, config = prepare_run_config(args.output_dir, args.manifest, full_manifest, source_identity)
+    binding = config["run_binding_sha256"]
     event_ids = [str(event["event_id"]) for event in full_manifest]
-    existing_checkpoints = load_valid_checkpoints(checkpoint_dir, event_ids)
+    existing_checkpoints = load_valid_checkpoints(checkpoint_dir, event_ids, binding)
     completed_ids = {
         event_id
         for checkpoint in existing_checkpoints
@@ -539,13 +568,13 @@ def main() -> int:
     run_events = 0
     try:
         if pending:
-            creds = read_credentials(args.credentials)
             print(
                 f"connecting to CCTS database with connect_timeout={args.connect_timeout}s",
                 flush=True,
             )
             conn = psycopg2.connect(
                 host=creds["host"],
+                port=args.port,
                 dbname=creds["dbname"],
                 user=creds["user"],
                 password=creds["password"],
@@ -566,7 +595,7 @@ def main() -> int:
                         flush=True,
                     )
                     turns, audits = fetch_batch(cur, batch)
-                    save_checkpoint(checkpoint_dir, key, event_ids, turns, audits)
+                    save_checkpoint(checkpoint_dir, key, event_ids, turns, audits, binding)
                     run_events += len(batch)
                     done = already_complete + run_events
                     elapsed = max(time.time() - started, 0.001)
@@ -593,6 +622,7 @@ def main() -> int:
             full_manifest,
             checkpoint_dir,
             scope_ids,
+            binding,
         )
 
     print(json.dumps(summary, indent=2))

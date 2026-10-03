@@ -14,7 +14,8 @@ scientific validation. Merging code does not authorize scaling the study.
 
 For long remote inference, the intended workflow is a named `screen` session,
 a log and atomic `status.json`: launch, detach, then inspect outputs later.
-The launcher is not implemented in this baseline. No CI job should access
+The launcher implements explicit validation, capture and approved scoring
+stages; it never grants execution approval itself. No CI job should access
 licensed databases, personal labels or shared compute.
 
 ## Safe Dashboard And Direct CSV Editing
@@ -72,3 +73,14 @@ valid abstentions are excluded from numerical-score comparisons. A technical
 pass does not certify scientific quality or a repeatability threshold. Whole-raw,
 token evidence, schema and provenance checks are now shared by both consumers.
 Incompatible historical artifacts are rejected, not automatically migrated.
+
+## Pending Saves
+
+The annotation dashboard temporarily disables editing, score/class actions,
+filters and navigation while a row save is in flight. The completed response
+cannot overwrite another row's draft. Failed saves retain the attempted score,
+class and notes in memory, including across navigation, for explicit retry.
+They are not persisted labels: do not close/reload the page before retrying or
+otherwise retaining the draft. A file-conflict response still blocks persistence
+until its underlying CSV/progress conflict is resolved; retry never bypasses
+server validation. These changes do not edit any existing human reference.

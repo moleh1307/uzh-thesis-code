@@ -58,6 +58,30 @@ named run artifacts. Use a fresh, explicitly authorized output directory.
 Source metadata changes during a resume are rejected, not silently merged.
 These are run identities, not a database-wide transactional snapshot guarantee.
 
+Metadata-rich CSV selection applies the same standard earnings event type and
+minimum start-date year as database selection. Date/year disagreement fails
+explicitly; eligible IDs must be unique and positive. Sorting precedes the
+event limit. Summaries include local input/filter/type/year/limit exclusion
+counts, distinct from database-wide metadata counts. Old checkpoints from
+the prior selector are not compatible because the implementation hash changes.
+
+## Fresh Package Publication
+
+Event masters and specificity scoring manifests stage all artifacts under a
+sibling temporary directory, then publish the completed directory. Existing
+directories (including empty ones) and symlinks are rejected unchanged; choose
+a fresh run name. The manifest builder's legacy `--force` flag no longer grants
+replacement permission. Empty/all-filtered Q&A produces a complete diagnostic
+package with stable headers and zero support; a header-only presentation input
+is rejected before publication. Neither outcome implies scoring readiness.
+
+Event-master `latest` uses a resolved absolute target, including when the output
+root was relative. Its pointer is replaced only after a complete new run is
+published; a real file/directory at `latest` is refused. A latest-update failure
+can leave a complete unpointed run, not a partial published package. Cooperating
+writers use a sibling publication lock. Abrupt process termination may leave a
+stale lock; it is not automatically removed or interpreted as completed work.
+
 ## Fetch Ordering And CSV Bound
 
 Fetch shard storage remains resumable. Materialization uses manifest event
@@ -66,6 +90,26 @@ order and validates shard ownership and unique audit rows. Temporary SQLite
 sorting keeps transcript memory bounded and files closed; allow temporary
 disk space for the staged text and final CSV. Old fetch CSVs are not rewritten
 by this repair; a newly authorized materialization is required.
+
+New fetch runs use checkpoint schema 2. The run and each committed shard bind
+manifest bytes/order, database host/name/user/port, SSL mode, runner/helper code
+hashes and output schemas. Source/code drift, foreign shard bindings and old
+unbound directories are refused before database contact or output rewriting.
+Password bytes and credential-file hashes are never recorded; rotating only
+the password permits same-source resume. Batch size, timeouts and a smoke limit
+can change without altering the full manifest binding. Matching credentials are
+read even when the requested scope is already checkpointed. These identities
+do not guarantee the database itself has remained unchanged between batches.
+
+## Model Length Metadata
+
+For the model lane, `--key-csv` must have the exact SHA-256 of the aggregation's
+`input_manifest`, and unit results must match the aggregation output hash.
+Matching IDs, words and dates alone cannot certify period bins. A byte-identical
+copy may be relocated; an edited or independently assembled key is rejected,
+as is an older receipt without the input binding. Rebuild a separately authorized
+aggregation from verified inputs rather than adding hashes to old evidence.
+The human-reference lane remains distinct and retains its existing validation.
 
 Every transcript CSV entry point explicitly sets `csv.field_size_limit` to
 `64 * 1024 * 1024` **decoded characters per field**, via `tools/csv_contract.py`.

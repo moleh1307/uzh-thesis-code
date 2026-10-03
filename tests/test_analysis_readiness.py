@@ -239,11 +239,24 @@ class LengthTests(unittest.TestCase):
         csv_write(model, rows)
         def bind():
             receipt.write_text(json.dumps(dict(status="completed_diagnostic_aggregation",
+                input_sha256={"input_manifest": length.sha256(self.key)},
                 output_sha256={"specificity_unit_results.csv": length.sha256(model)})))
         bind()
         self.args = SimpleNamespace(lane="model", coded_csv=None, key_csv=self.key,
                                     unit_results_csv=model, aggregation_summary=receipt)
         self.assertEqual(len(length.load_diagnostic_rows(self.args)[0]), 4)
+        original_key = self.key.read_bytes()
+        self.key.write_text(self.key.read_text().replace("early", "late"))
+        with self.assertRaisesRegex(ValueError, "exact input manifest"):
+            length.load_diagnostic_rows(self.args)
+        self.key.write_bytes(original_key)
+        original_receipt = receipt.read_bytes()
+        payload = json.loads(original_receipt)
+        del payload["input_sha256"]
+        receipt.write_text(json.dumps(payload))
+        with self.assertRaisesRegex(ValueError, "exact input manifest"):
+            length.load_diagnostic_rows(self.args)
+        receipt.write_bytes(original_receipt)
         model.write_text(model.read_text() + "\n")
         with self.assertRaises(ValueError):
             length.load_diagnostic_rows(self.args)

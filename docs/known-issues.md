@@ -15,12 +15,25 @@ the population has been validated.
   reconciliation; historical unbound gates remain rejected.
 - #29: repaired every-call exact-panel/tenure-roster reconciliation before
   turnover support counting.
-- Unrepaired in this scoped change: #24 standalone freeze dependency, #25 relative
-  latest symlink, #26 census metadata scope, #27 empty Q&A manifest, #28 event-master
-  overwrite, #30 length period metadata binding, #31 dashboard pending-save race,
-  and #32 fetch database/code resume identity.
+- #24: new freeze packets archive a complete hashed local import tree; all three
+  declared executables start outside the checkout, and the archived runner
+  validates all 100 synthetic requests without loading a model.
+- #25: latest links use resolved targets and atomic pointer replacement for
+  absolute or relative output roots; real paths are never replaced as links.
+- #26: metadata-rich CSVs apply the standard earnings type and minimum year,
+  validate date/year agreement, sort before limiting and report local exclusions.
+- #27: stable schemas support empty/all-filtered Q&A and zero scoring support;
+  incomplete packages never appear at the requested output directory.
+- #28: event-master publication refuses existing run names and stages complete
+  new packages without overwriting previous evidence or advancing latest early.
+- #30: model length diagnostics require the exact metadata input bytes recorded
+  in the aggregation receipt; substituted period bins and unbound receipts fail.
+- #31: pending saves lock editing/navigation; failed score/class/note drafts
+  survive navigation and retry, without changing the persisted label prematurely.
+- #32: fetch run configurations and shards bind nonsecret database/SSL identity,
+  extraction code and schemas before resume/contact; password rotation is allowed.
 
-These three repairs have synthetic regressions, not a live-data rebuild or
+These eleven repairs have synthetic regressions, not a live-data rebuild or
 model-scoring result. See [data integrity](data-integrity.md) for compatibility.
 
 ## Targeted Repairs

@@ -134,10 +134,12 @@ class FetchCctsTurnSampleTests(unittest.TestCase):
             manifest_path.write_text("event_id\n101\n102\n103\n", encoding="utf-8")
             manifest = fetcher.normalize_manifest(fetcher.read_csv(manifest_path), None)
             output_dir = root / "output"
-            checkpoint_dir, _ = fetcher.prepare_run_config(output_dir, manifest_path, manifest)
+            source = dict(host="synthetic", dbname="fixture", user="reader", port=5432, sslmode="disable")
+            checkpoint_dir, config = fetcher.prepare_run_config(output_dir, manifest_path, manifest, source)
+            binding = config["run_binding_sha256"]
             turns, audits = fetcher.fetch_batch(self.cursor, manifest[:2])
             ids = [event["event_id"] for event in manifest[:2]]
-            fetcher.save_checkpoint(checkpoint_dir, fetcher.checkpoint_key(ids), ids, turns, audits)
+            fetcher.save_checkpoint(checkpoint_dir, fetcher.checkpoint_key(ids), ids, turns, audits, binding)
 
             checkpoints = fetcher.load_valid_checkpoints(
                 checkpoint_dir, [event["event_id"] for event in manifest]
@@ -159,6 +161,7 @@ class FetchCctsTurnSampleTests(unittest.TestCase):
                 manifest,
                 checkpoint_dir,
                 ["101", "102"],
+                binding,
             )
             self.assertEqual(smoke_summary["status"], "complete")
             self.assertTrue(smoke_summary["limited_scope"])
@@ -170,6 +173,7 @@ class FetchCctsTurnSampleTests(unittest.TestCase):
                 manifest,
                 checkpoint_dir,
                 ["101", "102", "103"],
+                binding,
             )
             self.assertEqual(full_summary["status"], "partial")
             self.assertFalse(full_summary["limited_scope"])

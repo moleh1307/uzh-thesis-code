@@ -262,6 +262,7 @@ def qa_minus_pre_contrast(model: dict, words: int) -> dict:
 
 
 def load_diagnostic_rows(args):
+    key_digest = sha256(args.key_csv)
     keys_raw = read_csv(args.key_csv)
     key_field = "custom_id" if keys_raw and "custom_id" in keys_raw[0] else "audit_id"
     keys = index_unique(keys_raw, key_field, "length metadata")
@@ -278,6 +279,8 @@ def load_diagnostic_rows(args):
             raise ValueError("model length diagnostics require technically valid aggregation")
         if summary.get("output_sha256", {}).get("specificity_unit_results.csv") != sha256(args.unit_results_csv):
             raise ValueError("unit results are not bound to the aggregation receipt")
+        if summary.get("input_sha256", {}).get("input_manifest") != key_digest:
+            raise ValueError("length metadata must be the exact input manifest bound to the aggregation receipt")
         raw = read_csv(args.unit_results_csv)
         id_field = "custom_id"
     indexed = index_unique(raw, id_field, "length observations")
@@ -318,6 +321,8 @@ def load_diagnostic_rows(args):
             raise ValueError(f"scored target has no words: {unit_id}")
         rows.append({"audit_id": unit_id, "unit_type": kind, "period_bin": key["period_bin"],
                      "word_count": words, "score": score, "common_50_200": int(50 <= words <= 200)})
+    if sha256(args.key_csv) != key_digest:
+        raise ValueError("length metadata changed during validation")
     return rows, exclusions
 
 
