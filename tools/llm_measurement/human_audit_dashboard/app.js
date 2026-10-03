@@ -7,6 +7,7 @@ const state = {
   currentId: null,
   filter: "unscored",
   saving: false,
+  drafts: new Map(),
   contentClassRequired: false,
 };
 
@@ -94,9 +95,11 @@ function render() {
   elements.targetHeading.textContent = row.unit_type === "qa" ? "CEO answer" : "CEO presentation segment";
   elements.targetText.textContent = row.unit_type === "qa" ? row.ceo_answer : row.ceo_presentation_segment;
   elements.contentClassSection.hidden = !state.contentClassRequired;
-  elements.contentClass.value = row.label?.human_content_class || "";
-  elements.notes.value = row.label?.human_notes || "";
-  renderSelection(row.label);
+  const label = state.drafts.get(row.audit_id) || row.label;
+  elements.contentClass.value = label?.human_content_class || "";
+  elements.notes.value = label?.human_notes || "";
+  renderSelection(label);
+  if (state.drafts.has(row.audit_id)) setSaveStatus("Unsaved draft; retry saving", true);
   localStorage.setItem("specificityAuditCurrentId", row.audit_id);
 }
 
@@ -105,9 +108,26 @@ function setSaveStatus(text, error = false) {
   elements.saveStatus.style.color = error ? "#8f322b" : "#287a55";
 }
 
+function setSaving(saving) {
+  state.saving = saving;
+  // One in-flight row: prevent navigation or edits from being overwritten by its response.
+  document.querySelectorAll("button").forEach((button) => { button.disabled = saving; });
+  elements.notes.disabled = saving;
+  elements.contentClass.disabled = saving;
+  if (!saving) {
+    const index = state.filtered.findIndex((item) => item.audit_id === state.currentId);
+    elements.previousButton.disabled = index <= 0;
+    elements.nextButton.disabled = index < 0 || index >= state.filtered.length - 1;
+  }
+}
+
 async function saveLabel(humanOk, specificity, clear = false) {
   const row = currentRow();
-  if (!row || state.saving) return;
+  if (!row) return;
+  if (state.saving) {
+    setSaveStatus("Save in progress; please wait");
+    return;
+  }
   const contentClass = state.contentClassRequired ? elements.contentClass.value : "";
   const notes = elements.notes.value.trim();
   if (!clear && state.contentClassRequired && !contentClass) {
@@ -118,7 +138,13 @@ async function saveLabel(humanOk, specificity, clear = false) {
     setSaveStatus("Source-quality reason required", true);
     return;
   }
-  state.saving = true;
+  if (!clear) {
+    const draft = {human_ok: humanOk, human_specificity: specificity,
+      human_content_class: contentClass, human_notes: notes};
+    state.drafts.set(row.audit_id, draft);
+    renderSelection(draft);
+  }
+  setSaving(true);
   setSaveStatus("Saving…");
   try {
     const response = await fetch("/api/label", {
@@ -146,7 +172,9 @@ async function saveLabel(humanOk, specificity, clear = false) {
       };
     }
     state.stats = result.stats;
+    state.drafts.delete(row.audit_id);
     setSaveStatus("Saved");
+    setSaving(false);
     if (!clear && state.filter === "unscored") {
       applyFilter(false);
     } else {
@@ -155,11 +183,12 @@ async function saveLabel(humanOk, specificity, clear = false) {
   } catch (error) {
     setSaveStatus(error.message || "Save failed", true);
   } finally {
-    state.saving = false;
+    setSaving(false);
   }
 }
 
 function move(delta) {
+  if (state.saving) return;
   const index = state.filtered.findIndex((row) => row.audit_id === state.currentId);
   const target = state.filtered[index + delta];
   if (target) {
@@ -175,6 +204,7 @@ document.querySelectorAll(".score-button").forEach((button) => {
 
 document.querySelectorAll(".filter-button").forEach((button) => {
   button.addEventListener("click", () => {
+    if (state.saving) return;
     document.querySelectorAll(".filter-button").forEach((item) => item.classList.remove("active"));
     button.classList.add("active");
     state.filter = button.dataset.filter;
@@ -196,16 +226,26 @@ elements.nextButton.addEventListener("click", () => move(1));
 elements.notes.addEventListener("blur", (event) => {
   if (event.relatedTarget?.closest(".score-button, #clear-button, #unscorable-button, #source-missing-button")) return;
   const row = currentRow();
-  if (row?.label) saveLabel(row.label.human_ok, row.label.human_specificity);
+  const label = row && (state.drafts.get(row.audit_id) || row.label);
+  if (label) saveLabel(label.human_ok, label.human_specificity);
+});
+elements.notes.addEventListener("input", () => {
+  const draft = state.drafts.get(state.currentId);
+  if (draft && !state.saving) draft.human_notes = elements.notes.value;
 });
 elements.contentClass.addEventListener("change", () => {
   const row = currentRow();
-  if (state.contentClassRequired && row?.label) {
-    saveLabel(row.label.human_ok, row.label.human_specificity);
+  const label = row && (state.drafts.get(row.audit_id) || row.label);
+  if (state.contentClassRequired && label) {
+    saveLabel(label.human_ok, label.human_specificity);
   }
 });
 
 document.addEventListener("keydown", (event) => {
+  if (state.saving) {
+    event.preventDefault();
+    return;
+  }
   if (event.target === elements.notes || event.target === elements.contentClass) return;
   if (["1", "2", "3", "4", "5"].includes(event.key)) {
     event.preventDefault();
