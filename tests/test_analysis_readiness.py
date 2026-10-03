@@ -1,6 +1,8 @@
 """Offline readiness regressions; no transcript, model, SSH or API execution."""
 import csv
+import contextlib
 import hashlib
+import io
 import json
 import random
 import subprocess
@@ -327,3 +329,17 @@ class LauncherTests(unittest.TestCase):
                                  "--stage", "score"], capture_output=True, text=True, timeout=10)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("--confirm-scoring", result.stderr)
+
+    def test_parent_uses_forking_screen_daemon(self):
+        config = self.root / "job-config.json"
+        config.write_text(json.dumps(self.config))
+        job = self.root / "job"
+        argv = ["launcher", "--config", str(config), "--stage", "validate", "--job-dir", str(job),
+                "--session", "uzh-specificity-fixture"]
+        with patch.object(sys, "argv", argv), patch.object(launcher.subprocess, "run") as run, \
+                contextlib.redirect_stdout(io.StringIO()):
+            run.return_value = SimpleNamespace(returncode=0, stdout="", stderr="")
+            self.assertEqual(launcher.main(), 0)
+        self.assertEqual(run.call_args_list[1].args[0][1], "-dmS")
+        self.assertNotIn("-DmS", run.call_args_list[1].args[0])
+        self.assertEqual(json.loads((job / "status.json").read_text())["status"], "queued")

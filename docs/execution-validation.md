@@ -125,7 +125,9 @@ python3 tools/llm_measurement/launch_local_specificity.py \
   --job-dir /path/to/new-job-directory --session uzh-specificity-validation
 ```
 
-Every stage uses a fresh job directory and unique named `screen`. It binds input
+Every stage uses a fresh job directory and unique named `screen -dmS` daemon.
+Lowercase `-d` is intentional; uppercase `-D` would keep the caller waiting.
+It binds input
 and runner/helper hashes, writes `execution.json`, `execution.log` and atomic
 `status.json`, and returns immediately after requesting launch. Inspect status
 and logs separately; do not wait in an SSH session. `--stage capture` loads/hashes

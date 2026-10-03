@@ -135,7 +135,8 @@ def main():
     job.mkdir(parents=True, exist_ok=False)
     atomic_json_write(job / "execution.json", execution)
     atomic_json_write(job / "status.json", {"status": "queued", "stage": args.stage, "session": args.session})
-    result = subprocess.run(["screen", "-DmS", args.session, sys.executable, str(Path(__file__).resolve()),
+    # Lowercase -d forks a daemon; uppercase -D keeps this caller waiting.
+    result = subprocess.run(["screen", "-dmS", args.session, sys.executable, str(Path(__file__).resolve()),
                              "--worker", str(job)], capture_output=True, text=True)
     if result.returncode:
         atomic_json_write(job / "status.json", {"status": "launch_failed", "error": result.stderr})
