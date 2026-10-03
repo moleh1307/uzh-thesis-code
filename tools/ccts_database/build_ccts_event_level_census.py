@@ -218,10 +218,14 @@ def read_filtered_metadata_rows_from_csv(
     filter_column: str | None,
     filter_value: str,
     limit_events: int | None,
+    min_year: int = 2001,
+    selection_counts: dict[str, int] | None = None,
 ) -> List[Tuple[Any, ...]] | None:
     if path is None or not path.exists():
         return None
     rows: List[Tuple[Any, ...]] = []
+    counts = Counter(input_rows=0, excluded_by_event_id_filter=0,
+                     excluded_nonstandard_event_type=0, excluded_before_min_year=0)
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         if not reader.fieldnames:
@@ -231,17 +235,38 @@ def read_filtered_metadata_rows_from_csv(
         if filter_column and filter_column not in reader.fieldnames:
             return None
         for row in reader:
+            counts["input_rows"] += 1
             if filter_column:
                 value = row.get(filter_column, "")
                 if filter_value == "__truthy__":
                     if not truthy(value):
+                        counts["excluded_by_event_id_filter"] += 1
                         continue
                 elif str(value).strip() != filter_value:
+                    counts["excluded_by_event_id_filter"] += 1
                     continue
+            if row.get("event_type_name") != STANDARD_EARNING_TYPE:
+                counts["excluded_nonstandard_event_type"] += 1
+                continue
+            try:
+                year = datetime.fromisoformat(row["start_date"]).year
+                if int(row["year"]) != year:
+                    raise ValueError("year does not match start_date")
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(f"invalid local metadata date/year for event {row.get('event_id')}") from exc
+            if year < min_year:
+                counts["excluded_before_min_year"] += 1
+                continue
             rows.append(tuple(row.get(column, "") for column in METADATA_COLUMNS))
-            if limit_events and len(rows) >= limit_events:
-                break
     rows.sort(key=lambda row: (row[1], int(row[0])))
+    ids = [int(row[0]) for row in rows]
+    if any(event <= 0 for event in ids) or len(set(ids)) != len(ids):
+        raise ValueError("duplicate or invalid local metadata IDs")
+    counts["eligible_before_limit"] = len(rows)
+    rows = rows[:limit_events] if limit_events is not None else rows
+    counts["excluded_by_limit"] = counts["eligible_before_limit"] - len(rows)
+    if selection_counts is not None:
+        selection_counts.update(counts)
     return rows
 
 
@@ -839,11 +864,14 @@ def main() -> int:
         args.event_id_filter_column,
         args.event_id_filter_value,
     )
+    local_selection_counts = {}
     local_metadata_rows = read_filtered_metadata_rows_from_csv(
         args.event_id_csv,
         args.event_id_filter_column,
         args.event_id_filter_value,
         args.limit_events,
+        args.min_year,
+        local_selection_counts,
     )
     binding = {"schema": 1, "section_only": args.section_only, "min_year": args.min_year,
                "limit_events": args.limit_events, "standard_earning_type": STANDARD_EARNING_TYPE,
@@ -1009,6 +1037,7 @@ def main() -> int:
             "excluded_standard_rows_before_min_year": excluded_before_min_year,
             "events_in_census": int(summary_counter["events"]),
             "section_only": bool(args.section_only),
+            "local_metadata_selection_counts": local_selection_counts if local_metadata_rows is not None else None,
         },
         "counts": {k: int(v) for k, v in summary_counter.items()},
         "percentages": {
