@@ -12,13 +12,16 @@ import argparse
 import csv
 import html
 import json
+import os
 import re
+import uuid
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from csv_contract import configure_csv
+from artifact_publication import fresh_artifact_directory
 
 configure_csv()
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Set
@@ -450,12 +453,18 @@ def write_by_year(path: Path, rows: Sequence[Mapping[str, str]]) -> int:
 
 
 def make_latest_symlink(target: Path, latest: Path) -> None:
-    if latest.exists() or latest.is_symlink():
-        if latest.is_symlink() or latest.is_file():
-            latest.unlink()
-        else:
-            raise SystemExit(f"Refusing to replace non-symlink directory: {latest}")
-    latest.symlink_to(target, target_is_directory=True)
+    target = target.resolve(strict=True)
+    if not target.is_dir():
+        raise ValueError(f"latest target is not a directory: {target}")
+    if latest.exists() and not latest.is_symlink():
+        raise SystemExit(f"Refusing to replace non-symlink path: {latest}")
+    latest.parent.mkdir(parents=True, exist_ok=True)
+    temporary = latest.with_name(f".{latest.name}-{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.symlink_to(target, target_is_directory=True)
+        os.replace(temporary, latest)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def summary_text(payload: Mapping[str, Any], output_dir: Path) -> str:
@@ -528,22 +537,15 @@ def summary_text(payload: Mapping[str, Any], output_dir: Path) -> str:
     )
 
 
-def build_master(census: Path, output_root: Path, run_name: str | None = None) -> Dict[str, Any]:
-    if not census.exists():
-        raise SystemExit(f"Missing census input: {census}")
-    created = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_name = run_name or f"v1_{created}"
-    output_dir = output_root / run_name
-    output_dir.mkdir(parents=True, exist_ok=True)
-
+def write_master_package(census: Path, output_dir: Path, stage: Path, created: str) -> Dict[str, Any]:
     rows, columns = iter_master_rows(census)
     master_csv = output_dir / "ccts_event_master.csv"
     by_year_csv = output_dir / "ccts_event_master_by_year.csv"
     summary_json = output_dir / "ccts_event_master_summary.json"
     summary_md = output_dir / "ccts_event_master_summary.md"
 
-    write_csv(master_csv, rows, columns)
-    write_by_year(by_year_csv, rows)
+    write_csv(stage / master_csv.name, rows, columns)
+    write_by_year(stage / by_year_csv.name, rows)
 
     payload: Dict[str, Any] = {
         "created_utc": created,
@@ -571,9 +573,28 @@ def build_master(census: Path, output_root: Path, run_name: str | None = None) -
             "summary_md": str(summary_md),
         },
     }
+    summary_json = stage / summary_json.name
+    summary_md = stage / summary_md.name
     summary_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     summary_md.write_text(summary_text(payload, output_dir), encoding="utf-8")
-    make_latest_symlink(output_dir, output_root / "latest")
+    return payload
+
+
+def build_master(census: Path, output_root: Path, run_name: str | None = None) -> Dict[str, Any]:
+    if not census.is_file():
+        raise SystemExit(f"Missing census input: {census}")
+    created = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_name = run_name or f"v1_{created}"
+    if Path(run_name).name != run_name or run_name in (".", "..", "latest"):
+        raise ValueError("run name must be one new directory name, not latest")
+    output_root = output_root.resolve()
+    output_dir = output_root / run_name
+    latest = output_root / "latest"
+    if latest.exists() and not latest.is_symlink():
+        raise SystemExit(f"Refusing to replace non-symlink path: {latest}")
+    with fresh_artifact_directory(output_dir) as stage:
+        payload = write_master_package(census, output_dir, stage, created)
+    make_latest_symlink(output_dir, latest)
     return payload
 
 

@@ -20,6 +20,16 @@ configure_csv()
 from prepare_fresh_evaluation_human_package import validate_source_checksums
 from run_local_specificity import sha256_path, validate_request
 
+CODE_PATHS = (
+    "csv_contract.py",
+    "llm_measurement/run_local_specificity.py",
+    "llm_measurement/freeze_fresh_specificity_setup.py",
+    "llm_measurement/prepare_fresh_evaluation_human_package.py",
+    "llm_measurement/annotation_contract.py",
+    "llm_measurement/specificity_validation.py",
+    "llm_measurement/local_execution_identity.py",
+)
+
 
 def freeze(proposal: Path, package: Path, evaluation: Path, output: Path):
     if output.exists():
@@ -69,9 +79,10 @@ def freeze(proposal: Path, package: Path, evaluation: Path, output: Path):
         names = ("review-plan.md", "specificity-system-prompt.txt", "proposed-settings.json", "specificity-production-schema.json")
         for name in names:
             shutil.copyfile(proposal / name, temp / name)
-        for name in ("run_local_specificity.py", "freeze_fresh_specificity_setup.py",
-                     "specificity_validation.py", "local_execution_identity.py"):
-            shutil.copyfile(Path(__file__).with_name(name), temp / name)
+        for relative in CODE_PATHS:
+            destination = temp / "code/tools" / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(Path(__file__).resolve().parents[1] / relative, destination)
         shutil.copyfile(blinded, temp / "blinded_input_snapshot.csv")
         input_path = temp / "specificity_requests_100.jsonl"
         with input_path.open("x", encoding="utf-8") as handle:
@@ -83,7 +94,10 @@ def freeze(proposal: Path, package: Path, evaluation: Path, output: Path):
                    *(proposal / name for name in names)]
         manifest = {
             "status": "definition_and_input_frozen_pending_human_labels_and_remote_preflight",
-            "contract": "specificity_fresh100_complete_target_20261003",
+            "contract": "specificity_fresh100_complete_target_code_bundle_v2_20261003",
+            "code_entrypoints": ["code/tools/llm_measurement/" + name for name in (
+                "run_local_specificity.py", "freeze_fresh_specificity_setup.py",
+                "prepare_fresh_evaluation_human_package.py")],
             "client_date": "2026-10-03", "created_at_utc": datetime.now(timezone.utc).isoformat(),
             "authorization": "Record project-specific approval separately before use; this code does not grant authorization",
             "units": 100, "pre_units": 40, "qa_units": 60,
@@ -93,13 +107,14 @@ def freeze(proposal: Path, package: Path, evaluation: Path, output: Path):
             "live_human_progress_json": str(package / "fresh_evaluation_human_progress.json"),
             "original_proposal_copies": "Preserved verbatim; this manifest records the new freeze status",
             "source_sha256": {str(path): sha256_path(path) for path in dict.fromkeys(sources)},
-            "artifact_sha256": {path.name: sha256_path(path) for path in sorted(temp.iterdir())},
+            "artifact_sha256": {str(path.relative_to(temp)): sha256_path(path)
+                                for path in sorted(temp.rglob("*")) if path.is_file()},
             "privacy": "Licensed text local only; private key hashed, not read or copied; no human labels in model input",
             "next": "Complete and freeze existing blinded labels, verify runtime/checkpoint, then run the frozen evaluation; no automatic execution",
         }
         (temp / "freeze_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-        for path in temp.iterdir():
-            path.chmod(0o600)
+        for path in temp.rglob("*"):
+            path.chmod(0o700 if path.is_dir() else 0o600)
         os.replace(temp, output)
     return manifest
 
