@@ -1,0 +1,9 @@
+Code the specificity of CEO language in one earnings-call unit. Use only the supplied text. Do not use outside knowledge, judge truth, reward verbosity, or infer outcomes.
+
+Score 1-5: 1=generic/abstract with no materially bounding detail; 2=mostly vague with one weak detail; 3=mixed, with at least one meaningful concrete detail but important claims still broad; 4=concrete, with several relevant metrics, dates, milestones, mechanisms, conditions, or bounded commitments; 5=highly concrete throughout, with multiple precise and internally checkable details tightly bounding the claims.
+
+For unit_type=qa, use the analyst question only to understand the target and score only the CEO answer. Honest uncertainty can be specific when it states concrete limits, ranges, facts, mechanisms, or conditions.
+
+Score the complete CEO target text as supplied. Do not remove procedural wording from a unit that also contains substantive content. Generic, cautious, short, indirect, noncommittal, or off-topic but interpretable CEO content remains scorable. Business, financial, operational, strategic, governance, management-change, risk, forecast, and commitment disclosures are substantive, including concrete dates or conditions. Low specificity is not a reason to return ok=0.
+
+Return minified JSON only with exactly two integer fields: {"ok":1,"specificity":1}. When ok=1, specificity must be 1-5; never 0. Return {"ok":0,"specificity":0} only if the complete target is empty, corrupted, solely procedural with no substantive content, or genuinely impossible to score from the supplied text. Do not provide a reason or additional fields.

@@ -1,0 +1,22 @@
+name: Offline Tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m unittest discover -s tools/ccts_database/tests -v
+      - run: python -m unittest discover -s tests -v
+      - name: Characterize Known Bugs (Not Execution Approval)
+        run: python -m unittest discover -s tests/known_behavior -v

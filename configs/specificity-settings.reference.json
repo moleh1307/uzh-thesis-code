@@ -1,0 +1,120 @@
+{
+  "status": "migration_reference_only_runner_repairs_pending_not_execution_approval",
+  "proposal_version": "specificity_evaluation_proposal_20261002",
+  "model": {
+    "id": "Qwen/Qwen2.5-14B-Instruct",
+    "revision": "cf98f3b3bbb457ad9e2bb7baf9a0125b6b88caa8",
+    "checkpoint_availability": "must_verify_on_nottingham_before_execution",
+    "precision": "bfloat16",
+    "quantization": "none",
+    "device_map": "auto"
+  },
+  "runtime": {
+    "backend": "transformers_AutoModelForCausalLM",
+    "tokenizer_revision": "same_as_model",
+    "reference_versions": {
+      "python": "3.9.25",
+      "torch": "2.8.0+cu128",
+      "transformers": "4.51.3"
+    },
+    "current_environment_verified": false,
+    "version_change_policy": "stop_and_document_before_execution_no_silent_environment_substitution"
+  },
+  "decoding": {
+    "do_sample": false,
+    "temperature": null,
+    "temperature_note": "not_used_with_greedy_decoding_not_a_temperature_zero_API_call",
+    "top_p": null,
+    "top_k": null,
+    "seed": 0,
+    "max_new_tokens": 16,
+    "separate_thinking_flag": "not_exposed_by_this_runner",
+    "output": "JSON_only_no_reason_field",
+    "input_truncation": false
+  },
+  "packaging": {
+    "units_per_request": 1,
+    "messages": [
+      "system",
+      "user"
+    ],
+    "pre_user_fields": [
+      "unit_type",
+      "ceo_presentation_segment"
+    ],
+    "qa_user_fields": [
+      "unit_type",
+      "analyst_question",
+      "ceo_answer"
+    ],
+    "human_labels_in_model_input": false,
+    "licensed_text_cloud_transfer": false
+  },
+  "evaluation": {
+    "manifest_directory": "data/05_llm_measurement/03_calibration/20260916_untouched_source_clean_evaluation_manifest_v1",
+    "human_package_directory": "data/05_llm_measurement/02_human_audit/20260916_fresh_current_source_clean_evaluation_v1",
+    "units": 100,
+    "pre_units": 40,
+    "qa_units": 60,
+    "calls": 20,
+    "sample_is_complete_calls": false,
+    "first_run": "after_human_labels_and_proposal_are_frozen",
+    "repeat_runs": 2,
+    "repeat_scope": "same_100_requests_no_additional_human_coding",
+    "first_run_is_primary": true,
+    "average_or_select_best_repeat": false,
+    "legacy_300_unit_repeatability_requirement_satisfied": false,
+    "on_failure": "do_not_retune_on_these_100_units_do_not_scale_make_explicit_method_decision",
+    "on_pass": "eligible_to_plan_bounded_complete_call_pilot_not_production_approval"
+  },
+  "continuation_diagnostics": {
+    "source": "20260905_preqa_contrast_calibration_spec_with_20260906_repair_amendment",
+    "units": {
+      "within_one_agreement_min": 0.9,
+      "mae_max": 0.8,
+      "quadratic_weighted_kappa_min": 0.55
+    },
+    "sampled_call_contrasts": {
+      "minimum_comparable_calls": 20,
+      "mae_max": 0.3,
+      "absolute_mean_bias_max": 0.2,
+      "same_sign_rate_min": 0.8,
+      "spearman_min": 0.7,
+      "exact_zero": "separate_tie_category"
+    },
+    "repeatability_per_section": {
+      "linear_weighted_kappa_min": 0.7,
+      "within_one_agreement_min": 0.9,
+      "two_or_more_point_disagreement_rate_strictly_below": 0.05,
+      "absolute_mean_shift_max": 0.25
+    },
+    "missing_or_undefined_metric": "inconclusive_not_pass",
+    "unexplained_status_or_coverage_failure": "blocks_continuation",
+    "technical": {
+      "all_ids_accounted": true,
+      "raw_json_decoder": "json.loads_on_entire_stripped_raw_response_no_wrapper_or_think_salvage",
+      "raw_duplicate_json_keys": "reject",
+      "valid_schema_rate_after_at_most_one_retry_min": 0.999,
+      "retry_same_settings_preserve_first_attempt": true,
+      "retry_for_low_scores_or_human_disagreement": false,
+      "input_or_output_truncation_allowed": false
+    }
+  },
+  "migration_notes": {
+    "automatic_runner_configuration": false,
+    "original_values_preserved_except_status_and_local_directory_prefix": true,
+    "inherited_checkpoint_generation": {
+      "repetition_penalty": 1.05,
+      "enforcement": "not_explicitly_guarded_by_baseline_runner"
+    },
+    "reference_support": {
+      "eligibility_units": 99,
+      "numeric_units": 98,
+      "source_uninterpretable_excluded_from_primary": true
+    },
+    "gpu_runtime_packages_additionally_recorded": {
+      "accelerate": "1.6.0",
+      "safetensors": "0.5.3"
+    }
+  }
+}

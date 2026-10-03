@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Specificity Coding</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <header class="brand">
+          <div class="brand-mark">UZH</div>
+          <div>
+            <h1>Specificity Coding</h1>
+            <p>Contract v1</p>
+          </div>
+        </header>
+
+        <section class="progress-section" aria-labelledby="progress-title">
+          <div class="section-heading">
+            <h2 id="progress-title">Progress</h2>
+            <strong id="progress-count">0 / 0</strong>
+          </div>
+          <div class="progress-track" aria-hidden="true">
+            <div id="progress-bar" class="progress-bar"></div>
+          </div>
+          <div class="segment-stats">
+            <span>PRE <strong id="pre-count">0 / 0</strong></span>
+            <span>Q&amp;A <strong id="qa-count">0 / 0</strong></span>
+          </div>
+        </section>
+
+        <nav class="filters" aria-label="Unit filters">
+          <button class="filter-button active" data-filter="unscored" type="button">Unscored</button>
+          <button class="filter-button" data-filter="all" type="button">All</button>
+          <button class="filter-button" data-filter="pre" type="button">PRE</button>
+          <button class="filter-button" data-filter="qa" type="button">Q&amp;A</button>
+        </nav>
+
+        <section class="rubric" aria-labelledby="rubric-title">
+          <h2 id="rubric-title">Specificity</h2>
+          <ol>
+            <li><strong>1</strong><span>Generic or abstract</span></li>
+            <li><strong>2</strong><span>Mostly vague</span></li>
+            <li><strong>3</strong><span>Mixed detail</span></li>
+            <li><strong>4</strong><span>Concrete</span></li>
+            <li><strong>5</strong><span>Highly concrete</span></li>
+          </ol>
+        </section>
+
+        <a class="export-link" href="/api/export" download>Export coded CSV</a>
+      </aside>
+
+      <main class="workspace">
+        <header class="workspace-header">
+          <div>
+            <span id="unit-type" class="unit-type">Q&amp;A</span>
+            <span id="position" class="position">0 of 0</span>
+          </div>
+          <div id="save-status" class="save-status" role="status">Ready</div>
+        </header>
+
+        <div id="empty-state" class="empty-state" hidden>
+          <h2>Queue complete</h2>
+          <p>All units in this view have a saved label.</p>
+        </div>
+
+        <article id="coding-panel" class="coding-panel">
+          <section id="question-section" class="text-section">
+            <h2>Analyst question</h2>
+            <p id="question-text" class="source-text"></p>
+          </section>
+
+          <section class="text-section target-section">
+            <h2 id="target-heading">CEO answer</h2>
+            <p id="target-text" class="source-text"></p>
+          </section>
+
+          <section id="content-class-section" class="content-class-section" hidden>
+            <label for="content-class">Content class</label>
+            <select id="content-class">
+              <option value="">Select class</option>
+              <option value="substantive">Substantive</option>
+              <option value="mixed">Mixed</option>
+              <option value="procedural_only">Procedural only</option>
+              <option value="uncertain">Uncertain</option>
+            </select>
+          </section>
+
+          <section class="scoring-section" aria-labelledby="score-heading">
+            <div class="section-heading">
+              <h2 id="score-heading">Specificity score</h2>
+              <button id="clear-button" class="clear-button" type="button">Clear</button>
+            </div>
+            <div class="score-grid" role="group" aria-label="Specificity score">
+              <button type="button" class="score-button" data-score="1"><strong>1</strong><span>Generic</span></button>
+              <button type="button" class="score-button" data-score="2"><strong>2</strong><span>Vague</span></button>
+              <button type="button" class="score-button" data-score="3"><strong>3</strong><span>Mixed</span></button>
+              <button type="button" class="score-button" data-score="4"><strong>4</strong><span>Concrete</span></button>
+              <button type="button" class="score-button" data-score="5"><strong>5</strong><span>Precise</span></button>
+            </div>
+            <button id="unscorable-button" class="unscorable-button" type="button">Unscorable</button>
+          </section>
+
+          <section class="notes-section">
+            <label for="notes">Notes</label>
+            <textarea id="notes" rows="3" maxlength="2000"></textarea>
+          </section>
+        </article>
+
+        <footer class="navigation">
+          <button id="previous-button" type="button">Previous</button>
+          <span id="audit-id" class="audit-id">SPECV1_0001</span>
+          <button id="next-button" type="button">Next</button>
+        </footer>
+      </main>
+    </div>
+    <script src="/app.js" defer></script>
+  </body>
+</html>

@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+"""Audit local specificity output and an optional exact-repeat run."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    with path.open(encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                raise SystemExit(f"invalid JSONL at {path}:{line_number}: {exc}") from exc
+    return rows
+
+
+def read_csv(path: Path) -> dict[str, dict[str, str]]:
+    with path.open(newline="", encoding="utf-8-sig") as handle:
+        rows = list(csv.DictReader(handle))
+    result = {row["custom_id"]: row for row in rows}
+    if len(result) != len(rows):
+        raise SystemExit(f"duplicate custom_id in manifest: {path}")
+    return result
+
+
+def validate_score(value: object) -> tuple[bool, str]:
+    if not isinstance(value, dict):
+        return False, "parsed output is not an object"
+    if set(value) != {"ok", "specificity"}:
+        return False, "parsed output keys are not exactly ok,specificity"
+    ok = value["ok"]
+    specificity = value["specificity"]
+    if isinstance(ok, bool) or not isinstance(ok, int) or ok not in {0, 1}:
+        return False, "ok is not integer 0 or 1"
+    if isinstance(specificity, bool) or not isinstance(specificity, int) or not 0 <= specificity <= 5:
+        return False, "specificity is not integer 0 through 5"
+    if ok == 0 and specificity != 0:
+        return False, "ok=0 must have specificity=0"
+    if ok == 1 and specificity == 0:
+        return False, "ok=1 must have specificity 1 through 5"
+    return True, ""
+
+
+def index_results(rows: list[dict[str, Any]], label: str) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        custom_id = row.get("custom_id")
+        if not isinstance(custom_id, str) or not custom_id:
+            raise SystemExit(f"{label} has empty custom_id")
+        if custom_id in result:
+            raise SystemExit(f"{label} has duplicate custom_id: {custom_id}")
+        result[custom_id] = row
+    return result
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--input-jsonl", required=True, type=Path)
+    parser.add_argument("--manifest-csv", required=True, type=Path)
+    parser.add_argument("--output-jsonl", required=True, type=Path)
+    parser.add_argument("--repeat-output-jsonl", type=Path, default=None)
+    parser.add_argument("--run-manifest", required=True, type=Path)
+    parser.add_argument("--repeat-run-manifest", type=Path, default=None)
+    parser.add_argument("--model-hash-file", type=Path, default=None)
+    parser.add_argument("--output-dir", required=True, type=Path)
+    args = parser.parse_args()
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    inputs = index_results(read_jsonl(args.input_jsonl), "input")
+    outputs = index_results(read_jsonl(args.output_jsonl), "output")
+    repeats = (
+        index_results(read_jsonl(args.repeat_output_jsonl), "repeat output")
+        if args.repeat_output_jsonl
+        else None
+    )
+    manifest = read_csv(args.manifest_csv)
+    expected_ids = set(inputs)
+    value_sets = [("output", outputs), ("manifest", manifest)]
+    if repeats is not None:
+        value_sets.insert(1, ("repeat output", repeats))
+    for label, values in value_sets:
+        if set(values) != expected_ids:
+            raise SystemExit(f"{label} custom_id set does not match input")
+
+    audit_rows: list[dict[str, object]] = []
+    strict_valid = 0
+    row_errors = 0
+    repeat_exact_output = None if repeats is None else 0
+    repeat_exact_score = None if repeats is None else 0
+    for custom_id in inputs:
+        output = outputs[custom_id]
+        repeat = repeats[custom_id] if repeats is not None else None
+        parsed = output.get("parsed")
+        valid, validation_error = validate_score(parsed)
+        output_valid = (
+            output.get("status") == "completed"
+            and output.get("validation_error") is None
+            and valid
+        )
+        strict_valid += int(output_valid)
+        row_errors += int(output.get("status") == "error")
+        same_raw = repeat is not None and output.get("raw_output") == repeat.get("raw_output")
+        same_score = repeat is not None and output.get("parsed") == repeat.get("parsed")
+        if repeats is not None:
+            repeat_exact_output += int(same_raw)
+            repeat_exact_score += int(same_score)
+        source = manifest[custom_id]
+        audit_rows.append({
+            "custom_id": custom_id,
+            "unit_type": source.get("unit_type", ""),
+            "event_id": source.get("event_id", ""),
+            "start_date": source.get("start_date", ""),
+            "unit_word_count": source.get("unit_word_count", ""),
+            "question_word_count": source.get("question_word_count", ""),
+            "status": output.get("status", ""),
+            "ok": parsed.get("ok") if isinstance(parsed, dict) else "",
+            "specificity": parsed.get("specificity") if isinstance(parsed, dict) else "",
+            "validation_error": output.get("validation_error") or validation_error,
+            "input_tokens": output.get("input_tokens", ""),
+            "output_tokens": output.get("output_tokens", ""),
+            "elapsed_seconds": output.get("elapsed_seconds", ""),
+        "repeat_exact_output": int(same_raw) if repeats is not None else "",
+        "repeat_exact_score": int(same_score) if repeats is not None else "",
+        })
+
+    ok0_rows = [row for row in audit_rows if row["ok"] == 0]
+    score_distribution = Counter(
+        int(row["specificity"])
+        for row in audit_rows
+        if row["ok"] == 1 and row["specificity"] not in {"", None}
+    )
+    type_counts = Counter(row["unit_type"] for row in audit_rows)
+    valid_by_type = Counter(
+        row["unit_type"] for row in audit_rows if row["ok"] == 1 and not row["validation_error"]
+    )
+    input_tokens = sum(int(row["input_tokens"]) for row in audit_rows if row["input_tokens"] not in {"", None})
+    output_tokens = sum(int(row["output_tokens"]) for row in audit_rows if row["output_tokens"] not in {"", None})
+
+    fields = list(audit_rows[0]) if audit_rows else []
+    audit_csv = args.output_dir / "dry_run_audit.csv"
+    with audit_csv.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(audit_rows)
+
+    status = "passed_with_manual_edge_case" if ok0_rows else "passed"
+    report_lines = [
+        "# Local Specificity Run Audit",
+        "",
+        f"- Audit timestamp UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}",
+        f"- Status: **{status}**",
+        f"- Requested units: {len(inputs):,}",
+        f"- Strict-valid outputs: {strict_valid:,}/{len(inputs):,}",
+        f"- Row errors: {row_errors:,}",
+        f"- Input tokens: {input_tokens:,}",
+        f"- Output tokens: {output_tokens:,}",
+        "",
+        "## Unit Counts",
+        "",
+        *(f"- {unit_type}: {count:,} total; {valid_by_type[unit_type]:,} scored `ok=1`" for unit_type, count in sorted(type_counts.items())),
+        "",
+        "## Score Distribution",
+        "",
+        *(f"- specificity {score}: {score_distribution[score]:,}" for score in range(1, 6)),
+        "",
+        "## Manual Edge-Case Queue",
+        "",
+    ]
+    if repeats is not None:
+        report_lines.insert(8, f"- Exact raw-output repeatability: {repeat_exact_output:,}/{len(inputs):,}")
+        report_lines.insert(9, f"- Exact parsed-score repeatability: {repeat_exact_score:,}/{len(inputs):,}")
+    if ok0_rows:
+        report_lines.extend(
+            f"- `{row['custom_id']}` ({row['unit_type']}, event {row['event_id']}, {row['unit_word_count']} words): model returned `ok=0, specificity=0`; inspect the exact input in the request JSONL before production scaling."
+            for row in ok0_rows
+        )
+    else:
+        report_lines.append("- None.")
+    report_lines.extend([
+        "",
+        "## Interpretation",
+        "",
+        "- Strict-valid means the response obeys the production JSON contract; it does not certify substantive scoring quality.",
+        "- `ok=0` is retained as a manual edge case. It is not silently converted to a 1-5 score or dropped from the source package.",
+        "- This audit contains no transcript text; the exact model inputs remain in the local request JSONL.",
+    ])
+    report_path = args.output_dir / "dry_run_audit_report.md"
+    report_path.write_text("\n".join(report_lines) + "\n", encoding="utf-8")
+
+    comparison = {
+        "status": status,
+        "input_requests": len(inputs),
+        "strict_valid_outputs": strict_valid,
+        "row_errors": row_errors,
+        "repeat_exact_raw_outputs": repeat_exact_output,
+        "repeat_exact_parsed_scores": repeat_exact_score,
+        "unit_counts": dict(type_counts),
+        "score_distribution_ok1": {str(score): score_distribution[score] for score in range(1, 6)},
+        "ok0_custom_ids": [row["custom_id"] for row in ok0_rows],
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "artifacts": {
+            "audit_csv": str(audit_csv),
+            "report_md": str(report_path),
+            "input_jsonl": str(args.input_jsonl.resolve()),
+            "output_jsonl": str(args.output_jsonl.resolve()),
+            "repeat_output_jsonl": str(args.repeat_output_jsonl.resolve()) if args.repeat_output_jsonl else None,
+            "run_manifest": str(args.run_manifest.resolve()),
+            "repeat_run_manifest": str(args.repeat_run_manifest.resolve()) if args.repeat_run_manifest else None,
+            "model_hash_file": str(args.model_hash_file.resolve()) if args.model_hash_file else None,
+        },
+    }
+    comparison_path = args.output_dir / "dry_run_comparison.json"
+    comparison_path.write_text(json.dumps(comparison, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps(comparison, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

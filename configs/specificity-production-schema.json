@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ProposedSpecificityEvaluation20261002",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "ok": {"type": "integer", "enum": [0, 1]},
+    "specificity": {"type": "integer", "minimum": 0, "maximum": 5}
+  },
+  "required": ["ok", "specificity"],
+  "oneOf": [
+    {"properties": {"ok": {"const": 0}, "specificity": {"const": 0}}},
+    {"properties": {"ok": {"const": 1}, "specificity": {"minimum": 1, "maximum": 5}}}
+  ]
+}

@@ -1,0 +1,8 @@
+# Reference GPU package versions, not a complete environment lock.
+# Install only in a separately verified Linux/CUDA environment.
+# Python reference: 3.9.25. Do not install these into the offline test environment.
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.8.0+cu128
+transformers==4.51.3
+accelerate==1.6.0
+safetensors==0.5.3
