@@ -62,6 +62,7 @@ def procedure_kind(text):
         return 'clarification_request'
     if (len(n.split()) <= 60 and
         re.match(r'(?:so )?if i understand your question\b', n) and
+        not re.search(r'[.!?]\s+\S', text) and
         re.search(r'\b(?:do i have that right|is that correct)$', n)):
         return 'clarification_request'
     if re.fullmatch(r'do you want to (?:speak|attend|join)(?: or do you want to (?:speak|attend|join))?(?: it)?', n):
@@ -87,6 +88,7 @@ def procedure_kind(text):
         r'(?: and have a great day)?|'
         r'(?:and )?have a great day(?: and thank you for your time)?|'
         r'thanks for your time today|'
+        r'(?:thank you (?:all|everyone|everybody)|thanks everyone) for joining (?:us|the call)|'
         r'(?:thanks|thank you)(?: everyone| all| [a-z]+)?(?: for joining us)?|'
         r'all right(?: [a-z]+)?|'
         r'we (?:certainly )?(?:again )?appreciate (?:everyone s|everybody s|your) (?:interest|support)'

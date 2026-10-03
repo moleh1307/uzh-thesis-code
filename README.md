@@ -17,6 +17,13 @@ repair adds current Q&A-minus-PRE/common-support analysis, pinned length diagnos
 current annotation instructions and an explicit detached stage launcher. These
 software checks do not establish scoring quality or approve population inference.
 
+The priority integrity repair covers issues #23, #33 and #29: whole-passage
+procedural selection, source-bound speaker-gate bundles, and per-call tenure
+roster reconciliation. Historical unbound gates require an explicitly authorized
+fresh build. The eleven findings from the subsequent review remain tracked as
+open GitHub issues; this repair does not resolve the other eight findings.
+See [data integrity](docs/data-integrity.md) for the new contracts.
+
 ## Included
 
 - Pipeline/helper modules: CCTS retrieval, ExecuComp matching, CEO identity,

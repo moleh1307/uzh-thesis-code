@@ -40,25 +40,6 @@ OPERATOR_HANDOFF_IN_TEXT_RE = re.compile(
     r"(?:operator\s*:\s*)?(?:thank you\.?\s*)?(?:our|the|next|first)\s+question\s+comes\s+from",
     re.IGNORECASE,
 )
-CLARIFICATION_ANSWER_RE = re.compile(
-    r"\b(?:i (?:did not|didn't) hear|could you repeat|can you repeat|(?:please|you(?:'ll| will) have to) repeat yourself|"
-    r"repeat (?:yourself|the question)|say that again|did you say|"
-    r"i(?:'m| am) not sure i understand(?: the question)?|can you be more specific|"
-    r"is that what i heard you say|is that what you meant|what was that your question|"
-    r"could you (?:clarify|be more specific)|what do you mean by)\b",
-    re.IGNORECASE,
-)
-CLOSING_ANSWER_RE = re.compile(
-    r"^(?:(?:well|okay)[,.]?\s*)?(?:not at all\.\s*)?(?:in closing[,.]?\s*)?"
-    r"(?:i just wanted to say\s+)?(?:(?:we )?appreciate (?:you|everyone)|thank you all|"
-    r"thanks everyone).*\b(?:joining|call)\b",
-    re.IGNORECASE,
-)
-PLEASANTRY_ANSWER_RE = re.compile(
-    r"\(laughter\).*(?:thank you|called it|better start|good research)|"
-    r"(?:thank you|called it|better start|good research).*\(laughter\)",
-    re.IGNORECASE,
-)
 
 BLOCK_COLUMNS = [
     "block_id", "event_id", "sample_rank", "year", "start_date", "company_name", "company_ticker",
@@ -98,14 +79,11 @@ def non_substantive_answer_flags(value: str) -> list[str]:
     text = clean(value)
     words = word_count(text)
     flags: list[str] = []
-    # A clarification phrase inside a longer answer can precede substantive
-    # disclosure, so only short clarification-only turns are excluded.
-    if words <= 40 and CLARIFICATION_ANSWER_RE.search(text):
+    procedural = procedure_kind(text)
+    if procedural == "clarification_request":
         flags.append("CEO_ANSWER_IS_CLARIFICATION_REQUEST")
-    if CLOSING_ANSWER_RE.search(text):
+    if procedural == "closing_only":
         flags.append("CEO_ANSWER_IS_CLOSING_REMARKS")
-    if words <= 25 and PLEASANTRY_ANSWER_RE.search(text):
-        flags.append("CEO_ANSWER_IS_NONSUBSTANTIVE_PLEASANTRY")
     if words < 25 and re.search(r"(?:--|—)\s*$", text):
         flags.append("CEO_ANSWER_IS_INCOMPLETE_FRAGMENT")
     return flags
@@ -262,8 +240,6 @@ def extract_event(rows: Sequence[Mapping[str, str]], *, participant_roles=None, 
             block_flags.append('TRAILING_INTERRUPTED_CEO_TURN_REVIEW')
         if any(re.search(r'\((?:inaudible|technical difficult(?:y|ies))\)', row.get('text_contents', ''), re.I) for row in ceo_rows):
             block_flags.append('CEO_SOURCE_TEXT_GAP_REVIEW')
-        if re.search(r'\bthank (?:everybody|everyone|you all) for joining us\b', ceo_text, re.I):
-            block_flags.append('CEO_MIXED_CLOSING_REVIEW')
         preceding_question = ""
         if blocks and "UNRESOLVED_CEO_COUNTERQUESTION_REVIEW" in str(blocks[-1]["block_flags"]):
             previous_end = int(blocks[-1]["answer_end_sequence_id"])
@@ -340,7 +316,7 @@ def extract_event(rows: Sequence[Mapping[str, str]], *, participant_roles=None, 
                     "participant_guard_optin_20260906" if participant_roles is not None
                     else "external_speaker_gate_anchor_20260928_v1" if validated_anchor_key is not None
                     else "episode_coverage_guard_20260906"
-                ),
+                ) + "_whole_passage_v1_20261003",
                 "question_sequence_ids": json.dumps([r["sequence_id"] for r in question_rows]),
                 "ceo_answer_sequence_ids": json.dumps([r["sequence_id"] for r in ceo_rows]),
                 "context_sequence_ids": json.dumps([r["sequence_id"] for r in context_rows]),

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import json
 import sys
 import time
@@ -26,6 +25,7 @@ from build_ccts_ceo_presentation_representation import (
 )
 from validate_ccts_execucomp_speaker_identity import best
 from ceo_title_evidence import GATE_VERSION, candidate_evidence, evidence_labels, shared_evidence
+from speaker_gate_contract import BUNDLE_VERSION, input_bindings, sha256_file, verify_input_bindings
 
 
 ACCEPTED_NAME_RELATIONS = {
@@ -432,14 +432,6 @@ def write_csv(path: Path, fields: list[str], rows: Iterable[Mapping[str, Any]]) 
     temp_path.replace(path)
 
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def scan_turns(
     turns_path: Path,
     event_ids: list[str],
@@ -536,6 +528,7 @@ def scan_turns(
 def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.output_dir.exists():
         raise FileExistsError(f"output directory already exists: {args.output_dir}")
+    bindings = input_bindings(args)
     assignments = read_rows(args.event_assignments)
     episodes = read_rows(args.episode_manifest)
     turnover_map = read_rows(args.turnover_episode_map)
@@ -576,6 +569,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     turns_sha256 = None if limited else sha256_file(args.turns)
     if not limited and turns_sha256 != context["dedup_summary"].get("output_sha256"):
         raise ValueError("derived turn table SHA-256 differs from its deduplication summary")
+    verify_input_bindings(bindings, base_dir=Path.cwd())
 
     args.output_dir.mkdir(parents=True, exist_ok=False)
     event_path = args.output_dir / "event_speaker_gate.csv"
@@ -595,6 +589,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "created_at_utc": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
         "status": "smoke_complete" if limited else "complete",
+        "bundle_version": BUNDLE_VERSION,
+        "artifact_sha256": {name: sha256_file(Path(path)) for name, path in artifacts.items()},
         "limited_scope": limited,
         "event_scope": len(event_rows),
         "candidate_events_total": len(assignments),
@@ -610,6 +606,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "turnover_gate_pass": sum(int(row["turnover_analysis_gate_pass"]) for row in turnover_rows) if not limited else None,
         "turnover_gate_fail": sum(not int(row["turnover_analysis_gate_pass"]) for row in turnover_rows) if not limited else None,
         "provenance": {
+            "input_files": bindings,
             "turns_csv": str(args.turns),
             "turns_sha256_verified": turns_sha256,
             "event_assignments_csv": str(args.event_assignments),

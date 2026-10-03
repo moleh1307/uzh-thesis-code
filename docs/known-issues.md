@@ -1,7 +1,27 @@
 # Known Issues And Readiness
 
-As of 2026-10-03. Targeted repairs or explicit deprecation address all sixteen tracked findings; this is not
+As of 2026-10-03. Targeted repairs or explicit deprecation address the original sixteen tracked findings; this is not
 production scoring approval. Prompt, schema and model settings are unchanged.
+
+## Subsequent Review
+
+The deeper review added eleven findings (#23-#33). All remain open on GitHub,
+as requested; issue state is not a claim that a repair has been merged or that
+the population has been validated.
+
+- #23: repaired whole-passage procedural selection; business text following
+  courtesy or clarification phrases survives both selection paths.
+- #33: repaired source-bound speaker-gate bundles and external identity/support
+  reconciliation; historical unbound gates remain rejected.
+- #29: repaired every-call exact-panel/tenure-roster reconciliation before
+  turnover support counting.
+- Unrepaired in this scoped change: #24 standalone freeze dependency, #25 relative
+  latest symlink, #26 census metadata scope, #27 empty Q&A manifest, #28 event-master
+  overwrite, #30 length period metadata binding, #31 dashboard pending-save race,
+  and #32 fetch database/code resume identity.
+
+These three repairs have synthetic regressions, not a live-data rebuild or
+model-scoring result. See [data integrity](data-integrity.md) for compatibility.
 
 ## Targeted Repairs
 

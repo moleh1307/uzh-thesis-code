@@ -78,9 +78,38 @@ def episode_key(row: dict[str, str]) -> tuple[str, str, str]:
     return row["gvkey"], row["execid"], row["tenure_episode"]
 
 
+def validate_panel_against_roster(events, tenures):
+    """Fail before support counting when exact panel and roster evidence differ."""
+    roster = {}
+    for row in tenures:
+        key = episode_key(row)
+        if any(not value.strip() for value in key) or key in roster:
+            raise ValueError(f"blank or duplicate roster episode key: {key}")
+        start, end = d(row["ceo_start_date"]), d(row["ceo_end_date"])
+        if row["normalization_status"] == "exact_tenure_dates" and start > end:
+            raise ValueError(f"invalid exact roster tenure range: {key}")
+        roster[key] = row
+    seen_events = set()
+    for row in events:
+        event_id = row["event_id"].strip()
+        if not event_id or event_id in seen_events:
+            raise ValueError(f"blank or duplicate exact-panel event: {event_id}")
+        seen_events.add(event_id)
+        key = episode_key(row)
+        source = roster.get(key)
+        if source is None:
+            raise ValueError(f"event {event_id} has no matching roster episode: {key}")
+        if source["normalization_status"] != "exact_tenure_dates":
+            raise ValueError(f"event {event_id} maps to a nonexact roster episode: {key}")
+        for field in ("ceo_start_date", "ceo_end_date"):
+            if d(row[field]) != d(source[field]):
+                raise ValueError(f"event {event_id} tenure boundary differs from roster: {field}")
+        if not d(source["ceo_start_date"]) <= d(row["event_date"]) <= d(source["ceo_end_date"]):
+            raise ValueError(f"event {event_id} is outside its roster tenure: {key}")
+
+
 def main() -> int:
     cfg = args()
-    cfg.output_dir.mkdir(parents=True, exist_ok=True)
     sequence_path = cfg.output_dir / "ceo_call_sequences.csv"
     if sequence_path.exists() and not cfg.force:
         raise SystemExit(f"output exists; pass --force to replace: {sequence_path}")
@@ -90,6 +119,7 @@ def main() -> int:
         if not is_exact_panel_row(row):
             raise ValueError(f"event {row.get('event_id')} is not an unambiguous exact issuer/CEO match")
     tenures = read_csv(cfg.execucomp_tenures)
+    validate_panel_against_roster(events, tenures)
     calls_by_episode: dict[tuple[str, str, str], list[dict[str, str]]] = defaultdict(list)
     for row in events:
         calls_by_episode[episode_key(row)].append(row)
@@ -222,6 +252,7 @@ def main() -> int:
         statuses = [item for item in statuses if by_status[item]]
         cursor += 1
 
+    cfg.output_dir.mkdir(parents=True, exist_ok=True)
     write_csv(sequence_path, sequence_rows, SEQUENCE_FIELDS)
     write_csv(cfg.output_dir / "ceo_turnover_windows.csv", turnover_rows, TURNOVER_FIELDS)
     write_csv(cfg.output_dir / "ceo_turnover_anchor_ready.csv", anchor_rows, TURNOVER_FIELDS)

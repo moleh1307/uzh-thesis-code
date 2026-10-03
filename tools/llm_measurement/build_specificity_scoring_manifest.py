@@ -24,25 +24,6 @@ from ccts_qa_episodes import procedure_kind, source_quality_reasons
 
 SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?])\s+")
 WHITESPACE_RE = re.compile(r"\s+")
-CLARIFICATION_ANSWER_RE = re.compile(
-    r"\b(?:i (?:did not|didn't) hear|could you repeat|can you repeat|(?:please|you(?:'ll| will) have to) repeat yourself|"
-    r"repeat (?:yourself|the question)|say that again|did you say|"
-    r"i(?:'m| am) not sure i understand(?: the question)?|can you be more specific|"
-    r"is that what i heard you say|is that what you meant|what was that your question|"
-    r"could you (?:clarify|be more specific)|what do you mean by)\b",
-    re.IGNORECASE,
-)
-CLOSING_ANSWER_RE = re.compile(
-    r"^(?:(?:well|okay)[,.]?\s*)?(?:not at all\.\s*)?(?:in closing[,.]?\s*)?"
-    r"(?:i just wanted to say\s+)?(?:(?:we )?appreciate (?:you|everyone)|thank you all|"
-    r"thanks everyone).*\b(?:joining|call)\b",
-    re.IGNORECASE,
-)
-PLEASANTRY_ANSWER_RE = re.compile(
-    r"\(laughter\).*(?:thank you|called it|better start|good research)|"
-    r"(?:thank you|called it|better start|good research).*\(laughter\)",
-    re.IGNORECASE,
-)
 
 
 def read_csv(path: Path) -> list[dict[str, str]]:
@@ -75,12 +56,6 @@ def qa_non_substantive_reasons(text: str) -> list[str]:
     reasons.extend(source_quality_reasons(normalized))
     if procedural:
         reasons.append('procedural_' + procedural)
-    if words <= 40 and CLARIFICATION_ANSWER_RE.search(normalized):
-        reasons.append("clarification_only")
-    if CLOSING_ANSWER_RE.search(normalized):
-        reasons.append("closing_remarks")
-    if words <= 25 and PLEASANTRY_ANSWER_RE.search(normalized):
-        reasons.append("non_substantive_pleasantry")
     if words < 25 and re.search(r"(?:--|—)\s*$", normalized):
         reasons.append("incomplete_fragment")
     return reasons
