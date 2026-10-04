@@ -28,6 +28,13 @@ length-metadata binding, pending-save drafts and source/code-bound fetch resume.
 Issue state is deliberately separate from implementation status.
 See [data integrity](docs/data-integrity.md) for the new contracts.
 
+The candidate-turn assembly stage now combines separately saved sources in
+the exact rebuilt assignment order, preserving within-event transcript bytes
+and publishing a hashed, no-overwrite package. See the explicit command in
+[the reproduction inventory](docs/reproduction.md). A separate semicolon-title
+anchor parsing issue remains unresolved; assembly repair does not certify a
+speaker bundle or unblock scoring by itself.
+
 ## Included
 
 - Pipeline/helper modules: CCTS retrieval, ExecuComp matching, CEO identity,

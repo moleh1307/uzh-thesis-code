@@ -26,14 +26,15 @@ class CsvContractTests(unittest.TestCase):
                         and isinstance(node.value.func, ast.Name) and node.value.func.id == "configure_csv"
                         for node in tree.body))
                 count += 1
-        self.assertEqual(count, 25)
+        self.assertEqual(count, 26)
 
     def test_standalone_readers_accept_long_fields_without_fetcher_import(self):
         cases = [("ccts_database/build_ccts_execucomp_speaker_gate.py", "read_rows"),
                  ("ccts_database/extract_execucomp_confirmed_ceo_qa_blocks.py", "read_csv_rows"),
                  ("ccts_database/build_ccts_proposed_analysis_sample.py", None),
                  ("ccts_database/derive_ccts_turns_unique_sequence.py", None),
-                 ("llm_measurement/build_specificity_scoring_manifest.py", "read_csv")]
+                 ("llm_measurement/build_specificity_scoring_manifest.py", "read_csv"),
+                 ("ccts_database/assemble_ccts_candidate_turns.py", "records")]
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "long.csv"
             body = "Synthetic quoted text,\n" + "x" * 150_000
@@ -42,7 +43,7 @@ class CsvContractTests(unittest.TestCase):
                 writer.writerow(["unit_id", "text"])
                 writer.writerow(["one", body])
             for module, function in cases:
-                read_expression = (f"ns[{function!r}](Path(sys.argv[1]))" if function else
+                read_expression = (f"list(ns[{function!r}](Path(sys.argv[1])))" if function else
                                    "list(ns['csv'].DictReader(Path(sys.argv[1]).open(newline='')))")
                 code = ("import runpy,sys; from pathlib import Path; "
                         f"sys.path.insert(0,{str((ROOT / 'tools' / module).parent)!r}); "
