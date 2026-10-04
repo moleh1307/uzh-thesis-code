@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from extract_execucomp_confirmed_ceo_qa_blocks import run_extraction
 import extract_execucomp_confirmed_ceo_qa_blocks as consumer
-from ceo_title_evidence import GATE_VERSION
+from ceo_title_evidence import GATE_VERSION, encode_labels
 import build_ccts_execucomp_speaker_gate as producer
 from speaker_gate_contract import INPUT_NAMES, sha256_file
 
@@ -127,6 +127,25 @@ class ConfirmedCeoQaExtractionTests(unittest.TestCase):
             ("turnover_speaker_gate_csv", self.turnover_gate))}
         self.gate_summary.write_text(json.dumps(summary))
 
+    def rebuild_title_gate(self, pre_title, qa_title=None):
+        rows = producer.read_rows(self.turns)
+        for row in rows:
+            if row["event_id"] == "100" and row["text_name"].startswith("David Smith,"):
+                title = pre_title if row["analysis_text_type"] == "PRE" else (qa_title or pre_title)
+                row["text_name"] = f"David Smith, Acme Inc - {title} [{row['sequence_id']}]"
+        write_csv(self.turns, rows)
+        summary = json.loads(self.producer_args.dedup_summary.read_text())
+        summary["output_sha256"] = sha256_file(self.turns)
+        self.producer_args.dedup_summary.write_text(json.dumps(summary))
+        self.producer_args.output_dir = self.root / "structured_title_gate"
+        with contextlib.redirect_stdout(io.StringIO()):
+            producer.run(self.producer_args)
+        root = self.producer_args.output_dir
+        self.event_gate = root / "event_speaker_gate.csv"
+        self.episode_gate = root / "episode_speaker_gate.csv"
+        self.turnover_gate = root / "turnover_speaker_gate.csv"
+        self.gate_summary = root / "speaker_gate_summary.json"
+
     def tearDown(self) -> None:
         self.temp.cleanup()
 
@@ -151,6 +170,7 @@ class ConfirmedCeoQaExtractionTests(unittest.TestCase):
         with self.event_gate.open(encoding="utf-8", newline="") as handle:
             rows = list(csv.DictReader(handle))
         rows[0]["matched_shared_speakers"] = "Different Person, Acme Inc - CEO"
+        rows[0]["matched_shared_speakers_json"] = encode_labels([rows[0]["matched_shared_speakers"]])
         write_csv(self.event_gate, rows)
         self.refresh_artifact_hashes()
         with self.assertRaisesRegex(ValueError, "inconsistent CEO anchor"):
@@ -163,9 +183,10 @@ class ConfirmedCeoQaExtractionTests(unittest.TestCase):
     def test_preserved_title_variants_resolve_to_one_anchor(self) -> None:
         with self.event_gate.open(encoding="utf-8", newline="") as handle:
             rows = list(csv.DictReader(handle))
-        labels = "David Smith, Acme Inc - CEO; David Smith, Acme Inc - Chief Executive Officer"
-        rows[0]["matched_shared_speakers"] = labels
-        rows[0]["shared_ceo_speakers"] = labels
+        labels = ["David Smith, Acme Inc - CEO", "David Smith, Acme Inc - Chief Executive Officer"]
+        for field in ("matched_shared_speakers", "shared_ceo_speakers"):
+            rows[0][field] = "; ".join(labels)
+            rows[0][field + "_json"] = encode_labels(labels)
         write_csv(self.event_gate, rows)
         self.refresh_artifact_hashes()
         result = run_extraction(self.turns, self.event_gate, self.episode_gate,
@@ -176,12 +197,69 @@ class ConfirmedCeoQaExtractionTests(unittest.TestCase):
         with self.event_gate.open(encoding="utf-8", newline="") as handle:
             rows = list(csv.DictReader(handle))
         rows[0]["matched_shared_speakers"] += "; Other Person, Acme Inc - CEO"
+        rows[0]["matched_shared_speakers_json"] = encode_labels(
+            json.loads(rows[0]["matched_shared_speakers_json"]) + ["Other Person, Acme Inc - CEO"])
         write_csv(self.event_gate, rows)
         self.refresh_artifact_hashes()
         with self.assertRaisesRegex(ValueError, "inconsistent CEO anchor"):
             run_extraction(self.turns, self.event_gate, self.episode_gate,
                 self.turnover_gate, self.gate_summary, self.output, manual_audit_blocks=0)
         self.assertFalse(self.output.exists())
+
+    def test_semicolon_title_producer_to_extraction_round_trip(self):
+        self.rebuild_title_gate("Chairman; President; CEO", 'Chief Executive Officer; "Global" President')
+        result = run_extraction(self.turns, self.event_gate, self.episode_gate,
+            self.turnover_gate, self.gate_summary, self.output, manual_audit_blocks=0)
+        self.assertEqual(result["blocks"]["candidate_blocks_total"], 1)
+        rows = producer.read_rows(self.output / "ceo_qa_blocks.csv")
+        labels = json.loads(rows[0]["validated_ceo_speaker_json"])
+        self.assertEqual(len(labels), 2)
+        self.assertIn("David Smith, Acme Inc - Chairman; President; CEO", labels)
+        self.assertIn('David Smith, Acme Inc - Chief Executive Officer; "Global" President', labels)
+        self.assertEqual(rows[0]["ceo_answer"], producer.read_rows(self.turns)[2]["text_contents"])
+
+    def test_invalid_structured_gate_evidence_is_rejected(self):
+        original = producer.read_rows(self.event_gate)
+        for payload in ('not json', '"CEO"', '[null]', '[1]', '[true]', '[""]', '[]',
+                        '["David Smith, Acme Inc - CEO", "David Smith, Acme Inc - CEO"]'):
+            with self.subTest(payload=payload):
+                rows = [dict(row) for row in original]
+                rows[0]["matched_shared_speakers_json"] = payload
+                write_csv(self.event_gate, rows)
+                self.refresh_artifact_hashes()
+                with self.assertRaisesRegex(ValueError, "inconsistent CEO anchor"):
+                    consumer.load_speaker_gate(self.event_gate, self.episode_gate,
+                        self.turnover_gate, self.gate_summary, self.turns)
+
+    def test_structured_labels_require_matching_display_evidence(self):
+        rows = producer.read_rows(self.event_gate)
+        rows[0]["shared_ceo_speakers"] += "; President"
+        write_csv(self.event_gate, rows)
+        self.refresh_artifact_hashes()
+        with self.assertRaisesRegex(ValueError, "inconsistent CEO anchor"):
+            consumer.load_speaker_gate(self.event_gate, self.episode_gate,
+                self.turnover_gate, self.gate_summary, self.turns)
+
+    def test_missing_structured_column_is_not_recovered_from_display(self):
+        rows = producer.read_rows(self.event_gate)
+        for row in rows:
+            row.pop("matched_shared_speakers_json")
+        write_csv(self.event_gate, rows)
+        self.refresh_artifact_hashes()
+        with self.assertRaisesRegex(ValueError, "missing columns"):
+            consumer.load_speaker_gate(self.event_gate, self.episode_gate,
+                self.turnover_gate, self.gate_summary, self.turns)
+
+    def test_matched_label_must_be_present_in_shared_evidence(self):
+        rows = producer.read_rows(self.event_gate)
+        invented = "David Smith, Acme Inc - President and CEO"
+        rows[0]["matched_shared_speakers"] = invented
+        rows[0]["matched_shared_speakers_json"] = encode_labels([invented])
+        write_csv(self.event_gate, rows)
+        self.refresh_artifact_hashes()
+        with self.assertRaisesRegex(ValueError, "inconsistent CEO anchor"):
+            consumer.load_speaker_gate(self.event_gate, self.episode_gate,
+                self.turnover_gate, self.gate_summary, self.turns)
 
     def test_producer_binds_all_inputs_and_outputs(self):
         summary = json.loads(self.gate_summary.read_text())
@@ -312,11 +390,12 @@ class ConfirmedCeoQaExtractionTests(unittest.TestCase):
 
     def test_old_last_label_gate_is_not_recertified(self) -> None:
         summary = json.loads(self.gate_summary.read_text())
-        summary["gate_version"] = "v1.2"
-        self.gate_summary.write_text(json.dumps(summary))
-        with self.assertRaisesRegex(ValueError, "expected gate"):
-            run_extraction(self.turns, self.event_gate, self.episode_gate,
-                self.turnover_gate, self.gate_summary, self.output, manual_audit_blocks=0)
+        for old_version in ("v1.2", "v1.3_complete_title_evidence_20261003"):
+            summary["gate_version"] = old_version
+            self.gate_summary.write_text(json.dumps(summary))
+            with self.assertRaisesRegex(ValueError, "expected gate"):
+                run_extraction(self.turns, self.event_gate, self.episode_gate,
+                    self.turnover_gate, self.gate_summary, self.output, manual_audit_blocks=0)
         self.assertFalse(self.output.exists())
 
 

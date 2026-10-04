@@ -37,7 +37,7 @@ from extract_ccts_ceo_qa_blocks import (
 )
 
 
-from ceo_title_evidence import GATE_VERSION, single_anchor
+from ceo_title_evidence import GATE_VERSION, SPEAKER_LABEL_FIELDS, label_evidence, single_anchor
 from speaker_gate_contract import sha256_file, verify_artifact_bindings, verify_input_bindings
 from build_ccts_execucomp_speaker_gate import (
     EPISODE_FIELDS, TURNOVER_FIELDS, read_rows, validate_metadata_inputs,
@@ -46,7 +46,7 @@ from build_ccts_execucomp_speaker_gate import (
 
 EXPECTED_GATE_VERSION = GATE_VERSION
 EXPECTED_EXTERNAL_STATUS = "confirmed_external_ceo_shared_pre_qa"
-SCRIPT_VERSION = "external_execucomp_bound_speaker_gate_anchor_v3_20261004"
+SCRIPT_VERSION = "external_execucomp_bound_structured_anchor_v4_20261004"
 GATE_FIELDS = [
     "gvkey",
     "expected_execid",
@@ -56,6 +56,7 @@ GATE_FIELDS = [
     "calendar_quarter",
     "turnover_ids",
     "validated_ceo_speaker",
+    "validated_ceo_speaker_json",
     "external_name_match_quality",
     "external_speaker_validation_status",
     "speaker_gate_version",
@@ -165,6 +166,8 @@ def load_speaker_gate(
         "external_speaker_validation_status", "event_speaker_gate_pass",
         "gvkey", "expected_execid", "tenure_episode", "expected_ceo_name",
         "event_date", "calendar_quarter", "turnover_ids",
+        *SPEAKER_LABEL_FIELDS,
+        *[field + "_json" for field in SPEAKER_LABEL_FIELDS],
     }
     with event_gate_path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
@@ -190,15 +193,17 @@ def load_speaker_gate(
                     raise ValueError(f"pass flag/status conflict for event {event_id}")
                 if row["within_call_identity_ready"] != "1" or row["shared_ceo_candidate_count"] != "1":
                     raise ValueError(f"passing event {event_id} lacks one strict shared identity")
-                matched = row["matched_shared_speakers"].strip()
-                shared = row["shared_ceo_speakers"].strip()
                 try:
+                    matched = label_evidence(row, "matched_shared_speakers")
+                    shared = label_evidence(row, "shared_ceo_speakers")
                     matched_key = single_anchor(matched, speaker_key)
                     shared_key = single_anchor(shared, speaker_key)
                 except ValueError as exc:
                     raise ValueError(f"passing event {event_id} has an inconsistent CEO anchor") from exc
-                if not matched or not shared or not matched_key or matched_key != shared_key:
+                if not set(matched) <= set(shared) or matched_key != shared_key:
                     raise ValueError(f"passing event {event_id} has an inconsistent CEO anchor")
+            for field in SPEAKER_LABEL_FIELDS:
+                label_evidence(row, field)
             gate_rows[event_id] = row
 
     expected_events = int(gate_summary.get("candidate_events_total", -1))
@@ -280,6 +285,7 @@ def gate_metadata(row: Mapping[str, str], gate_version: str) -> dict[str, str]:
         "calendar_quarter": row["calendar_quarter"],
         "turnover_ids": row["turnover_ids"],
         "validated_ceo_speaker": row["matched_shared_speakers"],
+        "validated_ceo_speaker_json": row["matched_shared_speakers_json"],
         "external_name_match_quality": row["external_name_match_quality"],
         "external_speaker_validation_status": row["external_speaker_validation_status"],
         "speaker_gate_version": gate_version,
@@ -524,8 +530,7 @@ def run_extraction(
             section_counts = Counter(row.get("analysis_text_type", "") for row in rows)
             if section_counts["PRE"] != int(gate["pre_turn_rows"]) or section_counts["Q&A"] != int(gate["qa_turn_rows"]):
                 raise ValueError(f"section row counts differ from speaker gate for event {event_id}")
-            anchor_label = gate["matched_shared_speakers"].strip()
-            anchor_key = single_anchor(anchor_label, speaker_key)
+            anchor_key = single_anchor(label_evidence(gate, "matched_shared_speakers"), speaker_key)
             if not anchor_key:
                 raise ValueError(f"empty CEO anchor key for passing event {event_id}")
             event_row, event_blocks = extract_event(rows, validated_anchor_key=anchor_key)
@@ -733,7 +738,7 @@ def run_extraction(
                 "gate_summary_json": str(gate_summary_path.resolve()),
                 "gate_version": gate_version,
                 "gate_bundle_version": gate_summary["bundle_version"],
-                "external_identity_rule": "only event_speaker_gate_pass=1 and exactly one shared CCTS CEO speaker key; extraction is anchored to the gate's matched_shared_speakers label",
+                "external_identity_rule": "only event_speaker_gate_pass=1 and exactly one shared CCTS CEO speaker key; extraction is anchored to every full label in matched_shared_speakers_json",
             },
             "artifacts": {},
             "caveats": [

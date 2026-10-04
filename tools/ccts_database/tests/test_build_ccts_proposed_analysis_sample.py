@@ -1,4 +1,5 @@
 import csv
+import json
 import shutil
 import unittest
 
@@ -20,6 +21,7 @@ class ProposedSampleTests(unittest.TestCase):
 
     def test_management_context_requires_named_same_issuer_role(self):
         block = {"validated_ceo_speaker": "David Smith, Acme Inc - CEO", "context_sequence_ids": '["11"]'}
+        block["validated_ceo_speaker_json"] = json.dumps([block["validated_ceo_speaker"]])
         source = {"11": {"text_name": "Jane Jones, Acme Inc - CFO [11]"}}
         self.assertTrue(known_management_context(block, source, "david smith, acme inc"))
         for speaker in ("Jane Jones, Other Inc - CFO", "Unidentified Company Representative", "Jane Jones, Acme Inc - Guest"):
@@ -33,6 +35,7 @@ class ProposedSampleTests(unittest.TestCase):
             "ceo_answer_word_count": "1", "analyst_question": "Has revenue increased?",
             "block_flags": "SHORT_CEO_ANSWER", "quality_tier": "high",
         }
+        block["validated_ceo_speaker_json"] = json.dumps([block["validated_ceo_speaker"]])
         source = {"11": {"text_name": "Jane Jones, Acme Inc - CFO [11]"}}
         decision = classify_block(block, source, "david smith, acme inc")
         self.assertEqual(decision["primary_block_candidate"], 1)
@@ -66,6 +69,7 @@ class ProposedSampleTests(unittest.TestCase):
         fixture = extraction_fixture.ConfirmedCeoQaExtractionTests()
         fixture.setUp()
         try:
+            fixture.rebuild_title_gate("Chairman; President; CEO")
             run_extraction(fixture.turns, fixture.event_gate, fixture.episode_gate, fixture.turnover_gate, fixture.gate_summary, fixture.output, manual_audit_blocks=0)
             root = fixture.root / "fetch"
             (root / "derived_v1").mkdir(parents=True)
@@ -83,6 +87,11 @@ class ProposedSampleTests(unittest.TestCase):
             self.assertEqual(result["qa_blocks_reconstructed"], 1)
             self.assertEqual(result["lanes"]["primary"]["paired_calls"], 1)
             self.assertEqual(result["lanes"]["primary"]["supported_turnovers"], 0)
+            with (output / "call_level_sample.csv").open(newline="") as handle:
+                call = next(csv.DictReader(handle))
+            self.assertEqual(call["issuer_label_from_ceo_speaker"], "Acme Inc")
+            self.assertEqual(json.loads(call["validated_ceo_speaker_json"]),
+                             ["David Smith, Acme Inc - Chairman; President; CEO"])
             with (output / "ceo_pre_units.csv").open(newline="") as handle:
                 units = list(csv.DictReader(handle))
             self.assertEqual(units[0]["ceo_presentation_segment"], "We expect sales to grow ten percent this year.")
@@ -91,6 +100,20 @@ class ProposedSampleTests(unittest.TestCase):
             run(root, second, minimum_calls=1, minimum_quarters=1)
             for name in ("call_level_sample.csv", "episode_sample.csv", "turnover_sample.csv", "qa_block_decisions.csv", "ceo_pre_units.csv", "ceo_presentations.csv"):
                 self.assertEqual((output / name).read_bytes(), (second / name).read_bytes())
+            block_file = blocks / "ceo_qa_blocks.csv"
+            summary_file = blocks / "block_extraction_summary.json"
+            original_blocks, original_summary = block_file.read_bytes(), summary_file.read_bytes()
+            altered = extraction_fixture.producer.read_rows(block_file)
+            altered[0]["validated_ceo_speaker_json"] = '["Different Person, Acme Inc - CEO"]'
+            extraction_fixture.write_csv(block_file, altered)
+            rebound = json.loads(summary_file.read_text())
+            rebound["artifact_sha256"]["ceo_qa_blocks.csv"] = extraction_fixture.sha256_file(block_file)
+            summary_file.write_text(json.dumps(rebound))
+            with self.assertRaisesRegex(ValueError, "structured speaker evidence disagreement"):
+                run(root, fixture.root / "rejected_speaker_evidence")
+            self.assertFalse((fixture.root / "rejected_speaker_evidence").exists())
+            block_file.write_bytes(original_blocks)
+            summary_file.write_bytes(original_summary)
             with (blocks / "ceo_qa_blocks.csv").open("a") as handle:
                 handle.write("\n")
             rejected = fixture.root / "rejected"

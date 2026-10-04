@@ -42,6 +42,16 @@ RESOLUTION_FIELDS = [
     "text_char_count",
     "text_sha256",
 ]
+DERIVATION_VERSION = "exact_alias_bound_inputs_v2_20261004"
+
+
+def validate_header(fields, required, source):
+    if (not fields or any(not field.strip() for field in fields)
+            or len(fields) != len(set(fields))):
+        raise ValueError(f"Missing, blank or duplicate CSV columns: {source}")
+    missing = required - set(fields)
+    if missing:
+        raise ValueError(f"Missing required CSV columns in {source}: {sorted(missing)}")
 
 
 def canonical_event_id(value: str, source: str) -> str:
@@ -61,12 +71,11 @@ def load_fetch_audit(path: Path) -> tuple[dict[str, int], set[str]]:
 
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
-        fields = set(reader.fieldnames or [])
-        missing = required - fields
-        if missing:
-            raise ValueError(f"Fetch audit is missing columns: {sorted(missing)}")
+        validate_header(reader.fieldnames, required, path)
 
         for line_number, row in enumerate(reader, start=2):
+            if None in row or any(value is None for value in row.values()):
+                raise ValueError(f"Malformed fetch-audit CSV record: {path}:{line_number}")
             event_id = canonical_event_id(row["event_id"], f"{path}:{line_number}")
             if event_id in expected_rows:
                 raise ValueError(f"Duplicate event_id in fetch audit: {event_id}")
@@ -217,6 +226,8 @@ def build_derived_table(input_csv: Path, audit_csv: Path, output_dir: Path) -> d
     if not input_csv.is_file() or not audit_csv.is_file():
         raise FileNotFoundError("Both input CSV and fetch-audit CSV must exist")
 
+    input_sha256 = sha256_file(input_csv)
+    audit_sha256 = sha256_file(audit_csv)
     expected_rows, review_ids = load_fetch_audit(audit_csv)
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     temp_dir = Path(
@@ -244,9 +255,7 @@ def build_derived_table(input_csv: Path, audit_csv: Path, output_dir: Path) -> d
         with input_csv.open("r", encoding="utf-8-sig", newline="") as source:
             reader = csv.DictReader(source)
             input_fields = list(reader.fieldnames or [])
-            missing = REQUIRED_TURN_FIELDS - set(input_fields)
-            if missing:
-                raise ValueError(f"Input CSV is missing columns: {sorted(missing)}")
+            validate_header(input_fields, REQUIRED_TURN_FIELDS, input_csv)
             if ADDED_TURN_FIELDS & set(input_fields):
                 raise ValueError(
                     f"Input already contains derived columns: {sorted(ADDED_TURN_FIELDS & set(input_fields))}"
@@ -341,10 +350,11 @@ def build_derived_table(input_csv: Path, audit_csv: Path, output_dir: Path) -> d
         summary: dict[str, Any] = {
             "created_at_utc": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
             "status": "complete",
+            "derivation_version": DERIVATION_VERSION,
             "input_csv": str(input_csv),
-            "input_sha256": sha256_file(input_csv),
+            "input_sha256": input_sha256,
             "fetch_audit_csv": str(audit_csv),
-            "fetch_audit_sha256": sha256_file(audit_csv),
+            "fetch_audit_sha256": audit_sha256,
             "input_rows": input_rows,
             "input_events": event_count,
             "max_rows_per_event": max_rows_per_event,
@@ -370,6 +380,10 @@ def build_derived_table(input_csv: Path, audit_csv: Path, output_dir: Path) -> d
             json.dump(summary, handle, ensure_ascii=False, indent=2)
             handle.write("\n")
 
+        if sha256_file(input_csv) != input_sha256:
+            raise ValueError("Raw input CSV changed while the derived table was being built")
+        if sha256_file(audit_csv) != audit_sha256:
+            raise ValueError("Fetch audit CSV changed while the derived table was being built")
         os.replace(temp_dir, output_dir)
         return summary
     except Exception:

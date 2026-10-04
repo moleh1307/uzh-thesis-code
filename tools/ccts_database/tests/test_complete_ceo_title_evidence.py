@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import build_ccts_ceo_presentation_representation as pre
 import build_ccts_execucomp_speaker_gate as gate
 import extract_ccts_ceo_qa_blocks as qa
-from ceo_title_evidence import SPECIAL_CEO_RE, evidence_labels, single_anchor
+from ceo_title_evidence import SPECIAL_CEO_RE, encode_labels, evidence_labels, label_evidence, single_anchor
 from test_build_ccts_execucomp_speaker_gate import source
 
 
@@ -41,6 +41,7 @@ class CompleteCeoTitleEvidenceTests(unittest.TestCase):
                         self.assertIn("SPECIAL_CEO_TITLE", result["identity_flags"])
                         key = "pre_ceo_speakers" if section == "PRE" else "qa_ceo_speakers"
                         self.assertIn(special, result[key])
+                        self.assertTrue(any(special in value for value in label_evidence(result, key)))
                         self.assertEqual(result["shared_ceo_candidate_count"], 1)
                         audit, blocks = qa.extract_event(sorted(rows, key=lambda r: int(r["sequence_id"])))
                         self.assertIn("SPECIAL_CEO_TITLE", audit["event_flags"])
@@ -76,10 +77,29 @@ class CompleteCeoTitleEvidenceTests(unittest.TestCase):
         self.assertIn("Chief Executive Officer", result["shared_ceo_speakers"])
 
     def test_single_anchor_checks_every_label_not_just_first(self):
-        self.assertEqual(single_anchor("David Smith, Acme Corp - CEO; David Smith, Acme Corp - President and CEO", qa.speaker_key),
+        self.assertEqual(single_anchor(["David Smith, Acme Corp - CEO", "David Smith, Acme Corp - President and CEO"], qa.speaker_key),
                          "david smith acme corp")
         with self.assertRaises(ValueError):
-            single_anchor("David Smith, Acme Corp - CEO; Other Person, Acme Corp - CEO", qa.speaker_key)
+            single_anchor(["David Smith, Acme Corp - CEO", "Other Person, Acme Corp - CEO"], qa.speaker_key)
+
+    def test_structured_labels_preserve_title_punctuation(self):
+        values = ['David Smith, Acme Corp - Chairman; President; CEO',
+                  'David Smith, Acme Corp - CEO, "Global" division']
+        row = {"shared_ceo_speakers": "; ".join(values), "shared_ceo_speakers_json": encode_labels(values)}
+        self.assertEqual(label_evidence(row, "shared_ceo_speakers"), values)
+        self.assertEqual(single_anchor(values, qa.speaker_key), "david smith acme corp")
+
+    def test_flattened_legacy_labels_are_not_implicitly_split(self):
+        with self.assertRaises(ValueError):
+            single_anchor("David Smith, Acme Corp - Chairman; President; CEO", qa.speaker_key)
+
+    def test_invalid_structured_labels_are_rejected(self):
+        for values in ("CEO", [None], [1], [True], [""], [" "], ["CEO", "CEO"], {}):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                encode_labels(values)
+        self.assertEqual(encode_labels([]), "[]")
+        with self.assertRaises(ValueError):
+            single_anchor([], qa.speaker_key)
 
     def test_presentation_cli_uses_complete_title_evidence(self):
         with tempfile.TemporaryDirectory() as temp:

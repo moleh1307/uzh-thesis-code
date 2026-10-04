@@ -24,7 +24,10 @@ from build_ccts_ceo_presentation_representation import (
     speaker_key,
 )
 from validate_ccts_execucomp_speaker_identity import best
-from ceo_title_evidence import GATE_VERSION, candidate_evidence, evidence_labels, shared_evidence
+from ceo_title_evidence import (
+    GATE_VERSION, SPEAKER_LABEL_FIELDS, candidate_evidence, encode_labels,
+    evidence_labels, shared_evidence,
+)
 from speaker_gate_contract import BUNDLE_VERSION, input_bindings, sha256_file, verify_input_bindings
 
 
@@ -47,6 +50,7 @@ EVENT_FIELDS = [
     "matched_qa_speakers", "matched_shared_speakers", "pre_name_match_quality",
     "qa_name_match_quality", "external_name_match_quality",
     "external_speaker_validation_status", "event_speaker_gate_pass",
+    *[field + "_json" for field in SPEAKER_LABEL_FIELDS],
 ]
 
 EPISODE_FIELDS = [
@@ -148,6 +152,14 @@ def classify_event(
         )
 
     date_text = source["event_date"]
+    label_lists = {
+        "pre_ceo_speakers": evidence_labels(pre_candidates),
+        "qa_ceo_speakers": evidence_labels(qa_candidates),
+        "shared_ceo_speakers": shared_labels,
+        "matched_pre_speakers": pre_matches,
+        "matched_qa_speakers": qa_matches,
+        "matched_shared_speakers": shared_matches,
+    }
     return {
         "event_id": source["event_id"],
         "gvkey": source["gvkey"],
@@ -178,6 +190,7 @@ def classify_event(
         "external_name_match_quality": quality,
         "external_speaker_validation_status": external_status,
         "event_speaker_gate_pass": int(external_status == "confirmed_external_ceo_shared_pre_qa"),
+        **{field + "_json": encode_labels(values) for field, values in label_lists.items()},
     }
 
 

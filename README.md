@@ -31,9 +31,12 @@ See [data integrity](docs/data-integrity.md) for the new contracts.
 The candidate-turn assembly stage now combines separately saved sources in
 the exact rebuilt assignment order, preserving within-event transcript bytes
 and publishing a hashed, no-overwrite package. See the explicit command in
-[the reproduction inventory](docs/reproduction.md). A separate semicolon-title
-anchor parsing issue remains unresolved; assembly repair does not certify a
-speaker bundle or unblock scoring by itself.
+[the reproduction inventory](docs/reproduction.md). The subsequent repair uses
+structured full-label JSON evidence for semicolon-bearing titles, rejects
+ambiguous duplicate CSV headers in exact-alias derivation, and binds both raw
+and audit inputs before/after derivation. Existing gate outputs require a fresh
+compatible build; neither software repairs nor assembly alone certify the
+research sample or authorize model scoring. Tracking issues remain open by request.
 
 ## Included
 

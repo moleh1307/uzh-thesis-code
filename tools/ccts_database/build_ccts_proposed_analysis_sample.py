@@ -22,11 +22,12 @@ configure_csv()
 from ccts_qa_episodes import procedure_kind, source_quality_reasons
 from extract_ccts_ceo_qa_blocks import clean, is_analyst, is_operator, join_turns, label, speaker_key, word_count
 from extract_execucomp_confirmed_ceo_qa_blocks import load_speaker_gate, episode_key, sha256_file, validate_blocks
+from ceo_title_evidence import label_evidence, single_anchor
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "llm_measurement"))
 from build_specificity_scoring_manifest import split_long_turn
 
-VERSION = "proposed_analysis_sample_v1_20261002"
+VERSION = "proposed_analysis_sample_v2_structured_anchor_20261004"
 LANES = ("primary", "management_context", "qa_coverage")
 BENIGN_FLAGS = {
     "SHORT_ANALYST_QUESTION", "SHORT_CEO_ANSWER",
@@ -61,7 +62,9 @@ def issuer_label(speaker):
 
 
 def known_management_context(block, source, anchor):
-    issuer = issuer_label(block["validated_ceo_speaker"]).casefold()
+    labels = label_evidence(block, "validated_ceo_speaker")
+    single_anchor(labels, speaker_key)
+    issuer = issuer_label(labels[0]).casefold()
     others = []
     for seq in json.loads(block["context_sequence_ids"]):
         turn = source[str(seq)]
@@ -234,7 +237,7 @@ def run(root, output, minimum_calls=5, minimum_quarters=5):
     ]
     presentation_fields = [
         "event_id", "gvkey", "expected_execid", "tenure_episode", "event_date",
-        "validated_ceo_speaker", "pre_sequence_ids", "source_pre_word_count",
+        "validated_ceo_speaker", "validated_ceo_speaker_json", "pre_sequence_ids", "source_pre_word_count",
         "ceo_presentation_text",
     ]
     try:
@@ -267,8 +270,9 @@ def run(root, output, minimum_calls=5, minimum_quarters=5):
                     next_blocks = next(block_groups, None)
                 counts = Counter()
                 pre_rows = []
-                anchor = speaker_key({"text_name": g["matched_shared_speakers"]})
                 passed = g["_gate_pass"] == "1"
+                labels = label_evidence(g, "matched_shared_speakers")
+                anchor = single_anchor(labels, speaker_key) if passed else ""
                 if not passed and event_blocks:
                     raise ValueError("blocks for a failing speaker gate")
                 if passed:
@@ -309,6 +313,9 @@ def run(root, output, minimum_calls=5, minimum_quarters=5):
                         for field in ("gvkey", "expected_execid", "tenure_episode", "event_date", "calendar_quarter"):
                             if block[field] != g[field]:
                                 raise ValueError("block/gate metadata disagreement")
+                        if (block.get("validated_ceo_speaker") != g["matched_shared_speakers"]
+                                or block.get("validated_ceo_speaker_json") != g["matched_shared_speakers_json"]):
+                            raise ValueError("block/gate structured speaker evidence disagreement")
                         ids = set(json.loads(block["ceo_answer_sequence_ids"]))
                         if ids & owned:
                             raise ValueError("CEO source words duplicated across blocks")
@@ -333,6 +340,7 @@ def run(root, output, minimum_calls=5, minimum_quarters=5):
                         raise ValueError("PRE word ledger does not reconcile")
                     presentation_writer.writerow({
                         **g, "validated_ceo_speaker": g["matched_shared_speakers"],
+                        "validated_ceo_speaker_json": g["matched_shared_speakers_json"],
                         "pre_sequence_ids": json.dumps([r["sequence_id"] for r in pre_rows]),
                         "source_pre_word_count": counts["source_pre_words"],
                         "ceo_presentation_text": join_turns(pre_rows),
@@ -346,8 +354,9 @@ def run(root, output, minimum_calls=5, minimum_quarters=5):
                     "event_date", "calendar_quarter", "turnover_ids", "external_speaker_validation_status",
                 )}
                 call.update({
-                    "issuer_label_from_ceo_speaker": issuer_label(g["matched_shared_speakers"]) if passed else "",
+                    "issuer_label_from_ceo_speaker": issuer_label(labels[0]) if passed else "",
                     "validated_ceo_speaker": g["matched_shared_speakers"] if passed else "",
+                    "validated_ceo_speaker_json": g["matched_shared_speakers_json"] if passed else "[]",
                     "speaker_gate_pass": int(passed), "pre_sequence_ids": json.dumps([r["sequence_id"] for r in pre_rows]),
                     "source_pre_words": counts["source_pre_words"], "proposed_pre_words": counts["pre_proposed_words"],
                     "review_pre_words": counts["pre_review_words"], "procedural_pre_words": counts["pre_procedural_words"],
