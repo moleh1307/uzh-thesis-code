@@ -316,7 +316,7 @@ def extract_event(rows: Sequence[Mapping[str, str]], *, participant_roles=None, 
                     "participant_guard_optin_20260906" if participant_roles is not None
                     else "external_speaker_gate_anchor_20260928_v1" if validated_anchor_key is not None
                     else "episode_coverage_guard_20260906"
-                ) + "_whole_passage_v1_20261003",
+                ) + "_whole_passage_v2_20261004",
                 "question_sequence_ids": json.dumps([r["sequence_id"] for r in question_rows]),
                 "ceo_answer_sequence_ids": json.dumps([r["sequence_id"] for r in ceo_rows]),
                 "context_sequence_ids": json.dumps([r["sequence_id"] for r in context_rows]),

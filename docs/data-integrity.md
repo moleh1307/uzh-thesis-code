@@ -149,8 +149,15 @@ Recognized fully procedural passages remain excluded; unknown nonprocedural
 content remains visible, not automatically semantically validated. Interrupted
 or corrupted source text and uncertain question/answer boundaries retain their
 separate review flags. Existing labels, frozen samples and prompts are unchanged.
-New block extraction records the `whole_passage_v1_20261003` suffix; the anchored
-extractor records `external_execucomp_bound_speaker_gate_anchor_v2_20261003`.
+New block extraction records the `whole_passage_v2_20261004` suffix; the anchored
+extractor records `external_execucomp_bound_speaker_gate_anchor_v3_20261004`.
+The bounded saved-data rebuild exposed complete clarification passages that the
+first whole-passage repair did not recognize. The new rule excludes a passage
+only when every sentence is a recognized clarification or incidental apology.
+Clarification followed by business information or a disclosure limit remains
+visible. Unknown phrases are not inferred to be procedural. Preserve older
+diagnostic output and rebuild affected extraction and selection outputs in a
+fresh directory; no human ratings or scoring prompts need changing for this fix.
 
 The older speaker-validation CLI retains its name helpers but now confirms a
 turnover pair only with distinct confirmed old/new events, consistent expected
