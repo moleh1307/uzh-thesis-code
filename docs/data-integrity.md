@@ -150,7 +150,7 @@ content remains visible, not automatically semantically validated. Interrupted
 or corrupted source text and uncertain question/answer boundaries retain their
 separate review flags. Existing labels, frozen samples and prompts are unchanged.
 New block extraction records the `whole_passage_v2_20261004` suffix; the anchored
-extractor records `external_execucomp_bound_speaker_gate_anchor_v3_20261004`.
+extractor records `external_execucomp_bound_structured_anchor_v4_20261004`.
 The bounded saved-data rebuild exposed complete clarification passages that the
 first whole-passage repair did not recognize. The new rule excludes a passage
 only when every sentence is a recognized clarification or incidental apology.
@@ -158,6 +158,25 @@ Clarification followed by business information or a disclosure limit remains
 visible. Unknown phrases are not inferred to be procedural. Preserve older
 diagnostic output and rebuild affected extraction and selection outputs in a
 fresh directory; no human ratings or scoring prompts need changing for this fix.
+
+### Structured Speaker Titles And Deduplication Inputs
+
+Speaker gate `v1.4_structured_title_evidence_20261004` preserves full title labels
+in `_json` arrays. A semicolon inside one title is never a speaker separator.
+Readable display fields must agree with the structured evidence; every full
+anchor label must resolve to one nonempty person/issuer key. Malformed arrays,
+duplicate/blank labels, multiple people and unsupported old gate versions are
+rejected. Extracted blocks and proposed call/presentation tables retain
+`validated_ceo_speaker_json`. Do not add structured columns to retrospectively
+certify an old gate; produce fresh compatible evidence from saved inputs.
+
+Standalone exact-alias derivation rejects duplicate, blank and missing headers
+in both raw and audit CSVs. It records `exact_alias_bound_inputs_v2_20261004`,
+captures both input hashes before parsing and checks them before publishing the
+completed temporary package. An audit replacement after parsing, or a raw edit
+that preserves file size/mtime, cannot silently define the receipt's provenance.
+The alias-collapse comparison rule and transcript payload are unchanged. These
+checks detect mixed or changed inputs, not deliberate coordinated falsification.
 
 The older speaker-validation CLI retains its name helpers but now confirms a
 turnover pair only with distinct confirmed old/new events, consistent expected

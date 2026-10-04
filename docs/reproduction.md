@@ -57,12 +57,16 @@ database or runner provenance: review original fetch checkpoint bindings
 separately. Historical unbound fetch evidence remains unbound. It does not
 confirm speakers, remove duplicates, extract Q&A blocks or score text.
 
-Known separate blocker: the current anchor consumer splits its flattened label
-evidence on semicolons, which can also occur inside a legitimate executive
-title. Such a producer/consumer failure is not an approved gate; do not bypass
-the consumer, drop the offending call or weaken identity checks to continue.
+The structured-label repair removes the semicolon delimiter ambiguity without
+dropping legitimate titles or weakening identity checks. Such a failure in an
+older producer/consumer run is not an approved gate; do not bypass the consumer
+or silently upgrade old output files.
 Tracking: [candidate-order assembly](https://github.com/moleh1307/uzh-thesis-code/issues/37)
 and [semicolon-title anchors](https://github.com/moleh1307/uzh-thesis-code/issues/38).
+The standalone derivation repairs are tracked separately as
+[CSV header validation](https://github.com/moleh1307/uzh-thesis-code/issues/40)
+and [raw/audit byte binding](https://github.com/moleh1307/uzh-thesis-code/issues/41).
+Tracking issues remain open independently of implementation status.
 
 Required local helpers are retained: `extract_ccts_ceo_qa_blocks.py`,
 `ccts_qa_episodes.py`, `build_ccts_ceo_presentation_representation.py`,
@@ -73,11 +77,24 @@ The shared `ceo_title_evidence.py` helper retains every observed title per
 speaker key in both sections, with deterministic ordering. Special CEO roles
 are review flags even if another turn uses an ordinary CEO title. Concurrent
 Acting/Interim CFO labels do not, by themselves, imply a special CEO role.
-The speaker gate now declares `v1.3_complete_title_evidence_20261003`; strict
-anchored Q&A extraction requires this version and checks every label resolves
-to the same person. Saved v1.2 last-label gates cannot be retrospectively
-certified. A newly authorized source-backed gate rebuild is required before
+The speaker gate now declares `v1.4_structured_title_evidence_20261004`. All six
+speaker-label fields have `_json` companions containing arrays of full labels;
+the semicolon-joined fields are readable displays only. Consumers reject
+malformed, blank, duplicate or non-list evidence, check display consistency,
+and require every matched/shared anchor label to resolve to one person/issuer.
+Matched labels must be drawn from the shared evidence. Q&A outputs carry
+`validated_ceo_speaker_json`; extraction and proposed-sample construction both
+use the structured anchor rather than parsing display strings.
+Saved v1.2/v1.3 gates cannot be retrospectively certified or consumed by the new
+contract. A newly authorized source-backed gate rebuild is required before
 using this repair on research data; no real gate/sample was regenerated here.
+
+Exact-alias derivation now declares `exact_alias_bound_inputs_v2_20261004` in
+its summary. Both transcript and audit CSVs must have unique, nonblank headers.
+Their SHA-256 bindings are captured before parsing and compared again before
+publication; changes prevent publication of the temporary package. The receipt
+records the verified original bindings, not the hashes of replacement files.
+The exact two-row alias-collapse rule and retained transcript text are unchanged.
 
 Issuer matching, tenure normalization, census and fetch resume guards are also
 repaired. Read [data integrity](data-integrity.md) before continuing any older

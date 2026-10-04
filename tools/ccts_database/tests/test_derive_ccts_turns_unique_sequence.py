@@ -1,12 +1,15 @@
 import csv
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import derive_ccts_turns_unique_sequence as derive
 from derive_ccts_turns_unique_sequence import build_derived_table
 
 
@@ -151,6 +154,81 @@ class DeriveCctsTurnsTests(unittest.TestCase):
                 ],
             )
         self.assertFalse(self.output_dir.exists())
+
+    def seed_single_row(self):
+        write_csv(self.input_csv, TURN_FIELDS, [turn("1", "1", "Example Corp", "Original assertion")])
+        write_csv(self.audit_csv, AUDIT_FIELDS,
+                  [{"event_id": "1", "fetched_rows": "1", "fetch_status": "ok", "fetch_notes": ""}])
+
+    def test_rejects_duplicate_transcript_columns_before_text_is_overwritten(self):
+        self.seed_single_row()
+        with self.input_csv.open("w", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(TURN_FIELDS + ["text_contents"])
+            writer.writerow(["1", "1", "Example Corp", "Q&A", "Example Speaker",
+                             "FIRST ORIGINAL ASSERTION", "SECOND DIFFERENT ASSERTION"])
+        with self.assertRaisesRegex(ValueError, "duplicate CSV columns"):
+            build_derived_table(self.input_csv, self.audit_csv, self.output_dir)
+        self.assertFalse(self.output_dir.exists())
+
+    def test_rejects_duplicate_audit_columns_before_count_is_overridden(self):
+        self.seed_single_row()
+        with self.audit_csv.open("w", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["event_id", "fetched_rows", "fetched_rows", "fetch_status", "fetch_notes"])
+            writer.writerow(["1", "99", "1", "ok", ""])
+        with self.assertRaisesRegex(ValueError, "duplicate CSV columns"):
+            build_derived_table(self.input_csv, self.audit_csv, self.output_dir)
+        self.assertFalse(self.output_dir.exists())
+
+    def test_rejects_blank_and_missing_headers(self):
+        for kind in ("raw", "audit"):
+            for header in ("", "event_id, ,sequence_id\n", "event_id,wrong_column\n"):
+                with self.subTest(kind=kind, header=header):
+                    self.seed_single_row()
+                    (self.input_csv if kind == "raw" else self.audit_csv).write_text(header)
+                    with self.assertRaises(ValueError):
+                        build_derived_table(self.input_csv, self.audit_csv, self.output_dir)
+                    self.assertFalse(self.output_dir.exists())
+
+    def test_audit_change_during_processing_prevents_publication(self):
+        self.seed_single_row()
+        original = derive.make_event_rows
+
+        def change_audit(*args):
+            result = original(*args)
+            self.audit_csv.write_text(self.audit_csv.read_text().replace(",1,ok,", ",99,ok,"))
+            return result
+
+        with patch.object(derive, "make_event_rows", side_effect=change_audit):
+            with self.assertRaisesRegex(ValueError, "Fetch audit CSV changed"):
+                build_derived_table(self.input_csv, self.audit_csv, self.output_dir)
+        self.assertFalse(self.output_dir.exists())
+        self.assertFalse(list(self.root.glob(".derived_v1.tmp-*")))
+
+    def test_raw_change_with_same_size_and_restored_mtime_prevents_publication(self):
+        self.seed_single_row()
+        before = self.input_csv.stat()
+        original = derive.make_event_rows
+
+        def change_raw(*args):
+            result = original(*args)
+            self.input_csv.write_bytes(self.input_csv.read_bytes().replace(b"Original", b"Modified"))
+            os.utime(self.input_csv, ns=(before.st_atime_ns, before.st_mtime_ns))
+            return result
+
+        with patch.object(derive, "make_event_rows", side_effect=change_raw):
+            with self.assertRaisesRegex(ValueError, "Raw input CSV changed"):
+                build_derived_table(self.input_csv, self.audit_csv, self.output_dir)
+        self.assertFalse(self.output_dir.exists())
+
+    def test_unchanged_inputs_have_exact_before_and_after_bindings(self):
+        self.seed_single_row()
+        before = (derive.sha256_file(self.input_csv), derive.sha256_file(self.audit_csv))
+        summary = build_derived_table(self.input_csv, self.audit_csv, self.output_dir)
+        self.assertEqual((summary["input_sha256"], summary["fetch_audit_sha256"]), before)
+        self.assertEqual((derive.sha256_file(self.input_csv), derive.sha256_file(self.audit_csv)), before)
+        self.assertEqual(summary["derivation_version"], derive.DERIVATION_VERSION)
 
 
 if __name__ == "__main__":
