@@ -46,7 +46,7 @@ from build_ccts_execucomp_speaker_gate import (
 
 EXPECTED_GATE_VERSION = GATE_VERSION
 EXPECTED_EXTERNAL_STATUS = "confirmed_external_ceo_shared_pre_qa"
-SCRIPT_VERSION = "external_execucomp_bound_speaker_gate_anchor_v2_20261003"
+SCRIPT_VERSION = "external_execucomp_bound_speaker_gate_anchor_v3_20261004"
 GATE_FIELDS = [
     "gvkey",
     "expected_execid",

@@ -40,6 +40,25 @@ def source_quality_reasons(text):
     return reasons
 
 
+def clarification_only(text):
+    """Recognize complete clarification passages, never a procedural prefix alone."""
+    pieces = [norm(p) for p in re.split(r'[.!?]+', text) if norm(p)]
+    cue = re.compile(
+        r'(?:could|can|would) you (?:please )?(?:repeat|clarify)'
+        r'(?: (?:the|your) question| (?:that|it))?(?: again)?(?: please)?|'
+        r'(?:could|can|would) you (?:please )?say (?:that|it) again(?: please)?|'
+        r'i (?:missed|did not hear|didn t hear|did not catch|didn t catch) '
+        r'(?:your|the|that) question|'
+        r'(?:i )?i (?:m|am) not sure i (?:understand|follow) (?:your|the) question'
+    )
+    courtesy = re.compile(r'(?:i m|i am) sorry|sorry|well|please|thanks|thank you')
+    prefix = re.compile(r'^(?:well )?(?:(?:i m|i am) sorry |sorry )?')
+    matches = [bool(cue.fullmatch(prefix.sub('', p, count=1))) for p in pieces]
+    return bool(pieces) and any(matches) and all(
+        matched or courtesy.fullmatch(p) for p, matched in zip(pieces, matches)
+    )
+
+
 def procedure_kind(text):
     """Only high-specificity procedural patterns; unknown content stays visible."""
     n = norm(text)
@@ -58,7 +77,7 @@ def procedure_kind(text):
         return 'delegation_only'
     if re.fullmatch(r'i (?:am going to|m going to|will|ll) ask [a-z]+(?: [a-z]+)? to', n) and re.search(r'(?:\.{3}|\u2026)\s*$', text):
         return 'delegation_only'
-    if re.fullmatch(r'(?:could|can|would) you (?:please )?(?:repeat|clarify)(?: the question| that)?', n):
+    if clarification_only(text):
         return 'clarification_request'
     if (len(n.split()) <= 60 and
         re.match(r'(?:so )?if i understand your question\b', n) and
