@@ -18,10 +18,51 @@ All entries below are in `tools/ccts_database/`.
 | 5 | `build_execucomp_turnover_windows.py` | CEO transition support |
 | 6 | `build_turnover_candidate_manifest.py` | Candidate event fetch list |
 | 7 | `fetch_ccts_turn_sample.py` | Resumable source-turn retrieval |
-| 8 | `derive_ccts_turns_unique_sequence.py` | Exact-alias deduplication with provenance |
-| 9 | `build_ccts_execucomp_speaker_gate.py` | External CEO identity across PRE/Q&A |
-| 10 | `extract_execucomp_confirmed_ceo_qa_blocks.py` | Anchored Q&A block extraction |
-| 11 | `build_ccts_proposed_analysis_sample.py` | PRE units and matched call/episode support |
+| 8 | `assemble_ccts_candidate_turns.py` | Combine saved source pairs in exact candidate-assignment order |
+| 9 | `derive_ccts_turns_unique_sequence.py` | Exact-alias deduplication with provenance |
+| 10 | `build_ccts_execucomp_speaker_gate.py` | External CEO identity across PRE/Q&A |
+| 11 | `extract_execucomp_confirmed_ceo_qa_blocks.py` | Anchored Q&A block extraction |
+| 12 | `build_ccts_proposed_analysis_sample.py` | PRE units and matched call/episode support |
+
+### Combining Retained And Newly Retrieved Calls
+
+Use the rebuilt candidate assignments and saved metadata, not a concatenation
+of old and new transcript CSVs. The gate scans turns in assignment order.
+All paths below are placeholders for separately licensed local inputs:
+
+```bash
+python3 tools/ccts_database/assemble_ccts_candidate_turns.py \
+  --event-assignments /path/to/candidate_event_assignments.csv \
+  --event-metadata /path/to/ccts_event_master.csv \
+  --source /path/to/retained_raw_turns.csv /path/to/retained_fetch_audit.csv \
+  --source /path/to/new_raw_turns.csv /path/to/new_fetch_audit.csv \
+  --output-dir /path/to/fresh_candidate_assembly
+```
+
+The assembler selects exactly the assigned events, rejects source overlap,
+checks raw row/section/sequence counts against the supplied audits, and links
+only blank date/year/company header fields from metadata. Existing conflicting
+dates/years are errors. It copies whole event CSV byte spans in assignment
+order, preserves rows within each event, and verifies unchanged nonmetadata
+payloads. It handles quoted, multiline and UTF-8 text without ad hoc line sorting.
+A complete fresh package contains `candidate_raw_turns.csv`,
+`candidate_raw_audit.csv`, `event_source_provenance.csv` and
+`assembly_summary.json`; failures do not publish partial packages or overwrite
+an existing package.
+
+Run the existing exact-alias derivation on these assembled files, then build a
+new speaker gate from the rebuilt assignments, episodes, turnover map/pairs,
+global normalized roster and exact call sequences. Assembly does not certify
+database or runner provenance: review original fetch checkpoint bindings
+separately. Historical unbound fetch evidence remains unbound. It does not
+confirm speakers, remove duplicates, extract Q&A blocks or score text.
+
+Known separate blocker: the current anchor consumer splits its flattened label
+evidence on semicolons, which can also occur inside a legitimate executive
+title. Such a producer/consumer failure is not an approved gate; do not bypass
+the consumer, drop the offending call or weaken identity checks to continue.
+Tracking: [candidate-order assembly](https://github.com/moleh1307/uzh-thesis-code/issues/37)
+and [semicolon-title anchors](https://github.com/moleh1307/uzh-thesis-code/issues/38).
 
 Required local helpers are retained: `extract_ccts_ceo_qa_blocks.py`,
 `ccts_qa_episodes.py`, `build_ccts_ceo_presentation_representation.py`,
