@@ -75,6 +75,10 @@ See the [ordered script inventory](docs/reproduction.md),
 The runner now requires a reviewed local execution profile and exact unit metadata;
 see [execution and output checks](docs/execution-validation.md). Historical outputs
 without the required evidence cannot be silently consumed by the repaired tools.
+See [CEO-owned answer policy](docs/ceo-owned-answer-policy.md) for the explicit
+management-inclusive primary lane, retained strict robustness subset and separate
+raw-word, answer-inclusion and scoring coverage stages. Preparation is offline
+and does not authorize inference.
 
 Use this checkout for new code changes. Original research snapshots remain historical evidence;
 do not edit them or rerun old commands simply because this copy exists.
