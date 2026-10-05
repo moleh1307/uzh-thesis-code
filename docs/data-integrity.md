@@ -149,8 +149,8 @@ Recognized fully procedural passages remain excluded; unknown nonprocedural
 content remains visible, not automatically semantically validated. Interrupted
 or corrupted source text and uncertain question/answer boundaries retain their
 separate review flags. Existing labels, frozen samples and prompts are unchanged.
-New block extraction records the `whole_passage_v2_20261004` suffix; the anchored
-extractor records `external_execucomp_bound_structured_anchor_v4_20261004`.
+New block extraction retains the `whole_passage_v2_20261004` marker; the anchored
+extractor now records `external_execucomp_bound_research_requests_v5_20261005`.
 The bounded saved-data rebuild exposed complete clarification passages that the
 first whole-passage repair did not recognize. The new rule excludes a passage
 only when every sentence is a recognized clarification or incidental apology.
@@ -158,6 +158,34 @@ Clarification followed by business information or a disclosure limit remains
 visible. Unknown phrases are not inferred to be procedural. Preserve older
 diagnostic output and rebuild affected extraction and selection outputs in a
 fresh directory; no human ratings or scoring prompts need changing for this fix.
+
+### Research Roles And Indirect Requests
+
+Block extraction additionally records `research_requests_v3_20261005`.
+The shared role recognizer reads the title, not analyst keywords in a person's
+name or firm. It supports singular/plural analyst labels, explicit equity-research
+leadership and named Research Division associates/research leads. Generic bank
+employees, unidentified new associate roles, former analysts and issuer-management
+titles are not automatically promoted. Extraction, source reconstruction and
+management-context validation use the same recognizer. Known issuer affiliation
+from the validated CEO labels is excluded using normalized exact company evidence;
+this is not fuzzy employer matching or an exhaustive participant-role roster.
+The explicitly guarded participant-roster lane keeps its own role rules.
+
+Question applicability also recognizes bounded first-person looking/hoping-for
+requests for detail, color, clarification, updates, breakdowns or explanations
+with an explicit topic preposition. This rule is sentence-local: a separate
+statement must not complete an earlier nonrequest fragment. Generic statements,
+congratulations and implicit confirmations are not promoted by this addition.
+Source gaps and ambiguous boundaries still require review even if the request
+wording is recognized. These rules are conservative heuristics, not a semantic
+classifier or a guarantee of exhaustive Q&A coverage.
+
+Proposed-sample output records `proposed_analysis_sample_v3_research_roles_20261005`.
+Use fresh versioned extraction/sample directories and reconcile changes before
+replacing scoring inputs. The strict primary versus identified-management lane,
+raw Q&A coverage denominator and coverage thresholds are unchanged. Existing
+frozen ratings, model settings and prompts do not need recoding or retuning.
 
 ### Structured Speaker Titles And Deduplication Inputs
 

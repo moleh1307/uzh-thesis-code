@@ -26,7 +26,20 @@ from ccts_qa_episodes import collect_episode, procedure_kind, analyst_question_c
 
 
 CEO_RE = re.compile(r"\b(?:ceo|chief\s+executive\s+officer)\b", re.IGNORECASE)
-ANALYST_RE = re.compile(r"\banalyst\b", re.IGNORECASE)
+ANALYST_RE = re.compile(r"\banalysts?\b", re.IGNORECASE)
+RESEARCH_LEAD_RE = re.compile(
+    r"(?:MD|Managing Director|(?:Co[- ]?)?(?:Head|Director)) of "
+    r"(?:(?:[A-Za-z0-9&/]+[ -])+)?Research", re.IGNORECASE
+)
+RESEARCH_DIVISION_TITLE_RE = re.compile(
+    r"MD|Managing Director|(?:(?:Senior|Junior) )?(?:Research )?Associate", re.IGNORECASE
+)
+NON_RESEARCH_TITLE_RE = re.compile(
+    r"\b(?:CEO|chief executive officer|CFO|chief financial officer|"
+    r"investor relations|corporate finance|former|retired)\b|"
+    r"\bex[- ](?:research )?analysts?\b|\banalysts? assistant\b|"
+    r"\bassistant to (?:the )?(?:research )?analysts?\b", re.IGNORECASE
+)
 FORMER_CEO_RE = re.compile(r"\b(?:former|retired|ex[-\s])\b", re.IGNORECASE)
 from ceo_title_evidence import SPECIAL_CEO_RE, candidate_evidence, evidence_labels, shared_evidence
 OPERATOR_RE = re.compile(r"\boperator\b", re.IGNORECASE)
@@ -108,17 +121,39 @@ def is_ceo(row: Mapping[str, str]) -> bool:
     return True
 
 
-def is_analyst(row: Mapping[str, str]) -> bool:
+def speaker_affiliation(value: str) -> str:
+    identity = re.split(r"\s+-\s+", label({"text_name": value}), maxsplit=1)[0]
+    affiliation = identity.partition(",")[2].strip()
+    affiliation = re.sub(r"^(?:Jr\.?|Sr\.?|II|III|IV),\s*", "", affiliation, flags=re.I)
+    return re.sub(r",\s*Research Division$", "", affiliation, flags=re.I).strip()
+
+
+def is_analyst(row: Mapping[str, str], *, issuer_labels: Sequence[str] = ()) -> bool:
     value = label(row)
-    if ANALYST_RE.search(value):
-        return True
-    parts = re.split(r'\s+-\s+', re.sub(r'\s*\[\d+\]\s*$', '', value), maxsplit=1)
-    if len(parts) != 2 or is_ceo(row):
+    parts = re.split(r"\s+-\s+", value, maxsplit=1)
+    if len(parts) != 2:
+        return bool(re.fullmatch(
+            r"(?:Unidentified )?(?:(?:Senior|Junior) )?(?:(?:Equity )?Research )?Analysts?",
+            value, re.I))
+    identity, title = parts
+    if NON_RESEARCH_TITLE_RE.search(title):
         return False
-    firm, title = parts
-    return bool(re.fullmatch(r'(?:MD|Managing Director|Head|Director) of Equity Research', title, re.I) or
-                (re.search(r'\bResearch Division\b', firm, re.I) and
-                 re.fullmatch(r'MD|Managing Director', title, re.I)))
+    affiliation = normalized(speaker_affiliation(value))
+    if affiliation and any(affiliation == normalized(speaker_affiliation(issuer)) for issuer in issuer_labels):
+        return False
+    if ANALYST_RE.search(title):
+        return True
+    name, separator, affiliation = identity.partition(",")
+    # Additional role families need named institutional evidence, not keywords
+    # in a person's name or a generic associate/director title.
+    if (not separator or not affiliation.strip() or len(name.split()) < 2 or
+            re.search(r"\b(?:unidentified|unknown|operator)\b", name, re.I) or
+            re.search(r"\b(?:unidentified|unknown)\b", affiliation, re.I)):
+        return False
+    research_division = bool(re.search(r"\bResearch Division\b", affiliation, re.I))
+    if RESEARCH_LEAD_RE.fullmatch(title):
+        return research_division or bool(re.search(r"\bEquity Research$", title, re.I))
+    return research_division and bool(RESEARCH_DIVISION_TITLE_RE.fullmatch(title))
 
 
 def is_operator(row: Mapping[str, str]) -> bool:
@@ -187,6 +222,11 @@ def extract_event(rows: Sequence[Mapping[str, str]], *, participant_roles=None, 
         if not validated_anchor_key or validated_anchor_key not in shared_ceos:
             raise ValueError('Validated extraction requires an anchor present in both PRE and Q&A')
         shared_ceos = {validated_anchor_key: shared_ceos[validated_anchor_key]}
+
+    if participant_roles is None:
+        issuer_labels = evidence_labels(shared_ceos)
+        questioner = lambda r: is_analyst(r, issuer_labels=issuer_labels)
+        eligible_questioner = questioner
 
     flags: list[str] = []
     if not shared_ceos:
@@ -316,7 +356,7 @@ def extract_event(rows: Sequence[Mapping[str, str]], *, participant_roles=None, 
                     "participant_guard_optin_20260906" if participant_roles is not None
                     else "external_speaker_gate_anchor_20260928_v1" if validated_anchor_key is not None
                     else "episode_coverage_guard_20260906"
-                ) + "_whole_passage_v2_20261004",
+                ) + "_whole_passage_v2_20261004_research_requests_v3_20261005",
                 "question_sequence_ids": json.dumps([r["sequence_id"] for r in question_rows]),
                 "ceo_answer_sequence_ids": json.dumps([r["sequence_id"] for r in ceo_rows]),
                 "context_sequence_ids": json.dumps([r["sequence_id"] for r in context_rows]),
@@ -342,7 +382,7 @@ def extract_event(rows: Sequence[Mapping[str, str]], *, participant_roles=None, 
         "event_title": meta.get("event_title", ""),
         "pre_ceo_speakers": "; ".join(evidence_labels(pre_ceos)), "qa_ceo_speakers": "; ".join(evidence_labels(qa_ceos)),
         "shared_ceo_speakers": "; ".join(evidence_labels(shared_ceos)),
-        "qa_analyst_turn_count": sum(is_analyst(row) for row in qa_rows),
+        "qa_analyst_turn_count": sum(questioner(row) for row in qa_rows),
         "analyst_question_episodes": episodes, "eligible_ceo_qa_blocks": len(blocks),
         "high_quality_blocks": high_blocks, "event_audit_status": event_status,
         "event_flags": ";".join(sorted(set(flags))),
