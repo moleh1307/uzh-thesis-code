@@ -15,6 +15,14 @@ NEW_QUESTION = re.compile(r'\b(?:next|another|separate|second|follow up)\s+(?:qu
 QUESTION_CUE = re.compile(r'\b(?:what|when|where|why|how|could|can you|would you|do you|'
                           r'talk about|tell us|give us|help me|help us|wondering|curious|'
                           r'walk us|explain|quantify)\b')
+INDIRECT_DETAIL_REQUEST = re.compile(
+    r'\b(?:i|we) (?:am|are|was|were|would be) (?:just |also )?'
+    r'(?:looking|hoping) for (?:just )?(?:kind of )?'
+    r'(?:a little bit |a little |a bit |an? |some )?'
+    r'(?:more |additional |further )?'
+    r'(?:details?|colou?r|clarification|update|breakdown|explanation) '
+    r'(?:on|about|regarding|around|of) \S'
+)
 
 
 def acknowledgement(text):
@@ -125,7 +133,11 @@ def procedure_kind(text):
 
 
 def analyst_question_candidate(text):
-    return not procedure_kind(text) and ('?' in text or bool(QUESTION_CUE.search(norm(text))))
+    return not procedure_kind(text) and (
+        '?' in text or bool(QUESTION_CUE.search(norm(text))) or
+        any(INDIRECT_DETAIL_REQUEST.search(norm(sentence))
+            for sentence in re.split(r'[.!?]+', text))
+    )
 
 
 def bare_analyst_handoff(operator, following):

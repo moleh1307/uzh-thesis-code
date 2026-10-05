@@ -27,7 +27,7 @@ from ceo_title_evidence import label_evidence, single_anchor
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "llm_measurement"))
 from build_specificity_scoring_manifest import split_long_turn
 
-VERSION = "proposed_analysis_sample_v2_structured_anchor_20261004"
+VERSION = "proposed_analysis_sample_v3_research_roles_20261005"
 LANES = ("primary", "management_context", "qa_coverage")
 BENIGN_FLAGS = {
     "SHORT_ANALYST_QUESTION", "SHORT_CEO_ANSWER",
@@ -68,7 +68,7 @@ def known_management_context(block, source, anchor):
     others = []
     for seq in json.loads(block["context_sequence_ids"]):
         turn = source[str(seq)]
-        if speaker_key(turn) == anchor or is_analyst(turn) or is_operator(turn):
+        if speaker_key(turn) == anchor or is_analyst(turn, issuer_labels=labels) or is_operator(turn):
             continue
         parts = re.split(r"\s+-\s+", label(turn), maxsplit=1)
         if (len(parts) != 2 or not issuer

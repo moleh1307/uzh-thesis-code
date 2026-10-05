@@ -46,7 +46,7 @@ from build_ccts_execucomp_speaker_gate import (
 
 EXPECTED_GATE_VERSION = GATE_VERSION
 EXPECTED_EXTERNAL_STATUS = "confirmed_external_ceo_shared_pre_qa"
-SCRIPT_VERSION = "external_execucomp_bound_structured_anchor_v4_20261004"
+SCRIPT_VERSION = "external_execucomp_bound_research_requests_v5_20261005"
 GATE_FIELDS = [
     "gvkey",
     "expected_execid",
@@ -314,6 +314,7 @@ def validate_blocks(
     source = {str(row["sequence_id"]): row for row in rows}
     if len(source) != len(rows):
         raise ValueError(f"duplicate sequence ID in extracted event {event_id}")
+    issuer_labels = [row.get("text_name", "") for row in rows if speaker_key(row) == anchor_key]
     for block in blocks:
         if str(block["event_id"]) != event_id:
             raise ValueError(f"block {block['block_id']} has the wrong event ID")
@@ -329,7 +330,7 @@ def validate_blocks(
         question_rows = [source[value] for value in ids_by_field["question_sequence_ids"]]
         answer_rows = [source[value] for value in ids_by_field["ceo_answer_sequence_ids"]]
         context_rows = [source[value] for value in ids_by_field["context_sequence_ids"]]
-        if any(not is_analyst(row) for row in question_rows):
+        if any(not is_analyst(row, issuer_labels=issuer_labels) for row in question_rows):
             raise ValueError(f"block {block['block_id']} contains a non-analyst question turn")
         if any(not is_ceo(row) or speaker_key(row) != anchor_key for row in answer_rows):
             raise ValueError(f"block {block['block_id']} contains a non-anchored CEO answer turn")

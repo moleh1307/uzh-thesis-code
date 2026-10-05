@@ -166,6 +166,35 @@ class ConfirmedCeoQaExtractionTests(unittest.TestCase):
                          "David Smith, Acme Inc - CEO; David Smith, Acme Inc - Chief Executive Officer")
         self.assertIn("ten percent", blocks[0]["ceo_answer"])
 
+    def test_research_roles_and_indirect_request_in_bound_publication(self):
+        for index, title in enumerate(("Associate", "Research Associate", "Co-Head of Research",
+                                       "Head of Technology Equity Research", "Analysts")):
+            with self.subTest(title=title):
+                rows = producer.read_rows(self.turns)
+                rows[1]["text_name"] = "Jordan Jones, Example Securities, Research Division - " + title
+                rows[1]["text_contents"] = "I was looking for a little more detail on the revenue outlook."
+                write_csv(self.turns, rows)
+                summary = json.loads(self.producer_args.dedup_summary.read_text())
+                summary["output_sha256"] = sha256_file(self.turns)
+                self.producer_args.dedup_summary.write_text(json.dumps(summary))
+                root = self.root / f"research_gate_{index}"
+                self.producer_args.output_dir = root
+                with contextlib.redirect_stdout(io.StringIO()):
+                    producer.run(self.producer_args)
+                destination = self.root / f"research_blocks_{index}"
+                result = run_extraction(
+                    self.turns, root / "event_speaker_gate.csv", root / "episode_speaker_gate.csv",
+                    root / "turnover_speaker_gate.csv", root / "speaker_gate_summary.json",
+                    destination, manual_audit_blocks=0,
+                )
+                self.assertEqual(result["blocks"]["candidate_blocks_total"], 1)
+                self.assertEqual(result["script_version"], consumer.SCRIPT_VERSION)
+                blocks = producer.read_rows(destination / "ceo_qa_blocks.csv")
+                self.assertEqual(blocks[0]["quality_tier"], "high")
+                self.assertEqual(blocks[0]["analyst_question"], rows[1]["text_contents"])
+                self.assertEqual(blocks[0]["ceo_answer"], rows[2]["text_contents"])
+                self.assertIn("research_requests_v3_20261005", blocks[0]["extraction_version"])
+
     def test_refuses_gate_anchor_inconsistent_with_shared_speaker(self) -> None:
         with self.event_gate.open(encoding="utf-8", newline="") as handle:
             rows = list(csv.DictReader(handle))
